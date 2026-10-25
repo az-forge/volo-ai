@@ -94,6 +94,32 @@ class DesktopDiagnosticsTests(unittest.TestCase):
             self.assertEqual(event["duration_ms"], 317)
             self.assertNotIn(home_path, json.dumps(report))
 
+    def test_os_error_message_keeps_safe_details_only(self):
+        error = OSError(9, "Bad file descriptor", str(Path.home() / "secret" / "model.bin"))
+        error.winerror = 6
+
+        message = desktop_diagnostics.os_error_message(error)
+
+        self.assertIn("OSError", message)
+        self.assertIn("errno=9", message)
+        self.assertIn("winerror=6", message)
+        self.assertIn("strerror=Bad file descriptor", message)
+        self.assertNotIn("model.bin", message)
+        self.assertNotIn(str(Path.home()), message)
+
+    def test_os_error_message_handles_missing_and_foreign_errors(self):
+        self.assertIsNone(desktop_diagnostics.os_error_message(RuntimeError("boom")))
+        self.assertEqual(
+            desktop_diagnostics.os_error_message(OSError("disk went away")),
+            "OSError",
+        )
+        self.assertEqual(
+            desktop_diagnostics.os_error_message(
+                FileNotFoundError(2, "No such file or directory")
+            ),
+            "FileNotFoundError (errno=2, strerror=No such file or directory)",
+        )
+
     def test_clear_removes_persisted_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

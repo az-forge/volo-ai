@@ -1,5 +1,7 @@
+import importlib.util
 import json
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -7,11 +9,18 @@ import unittest
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from tts_mcp.engine import DownloadCancelled, Engine, validate_language
+from tts_mcp import desktop_diagnostics
+from tts_mcp.engine import (
+    DownloadCancelled,
+    Engine,
+    _detect_device_hint,
+    validate_language,
+)
 
 
 class FakeModel:
@@ -295,6 +304,123 @@ class EngineTests(unittest.TestCase):
                 status = Engine().model_status()
 
         self.assertTrue(status["ready"])
+
+    @staticmethod
+    def _without_torch_module():
+        modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name != "torch" and not name.startswith("torch.")
+        }
+        return patch.object(sys, "modules", modules)
+
+    @staticmethod
+    def _fake_torch_spec(directory: str, version_source: str | None = None):
+        package = Path(directory) / "torch"
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text("")
+        if version_source is not None:
+            (package / "version.py").write_text(version_source)
+        return importlib.util.spec_from_file_location("torch", init)
+
+    def test_detect_device_hint_uses_torch_when_loaded(self):
+        with (
+            patch.dict(sys.modules, {"torch": ModuleType("torch")}),
+            patch("tts_mcp.engine._detect_device", return_value="mps") as detect,
+        ):
+            self.assertEqual(_detect_device_hint(), "mps")
+        detect.assert_called_once_with()
+
+    def test_detect_device_hint_windows_cpu_torch_skips_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = self._fake_torch_spec(tmp, "cuda: Optional[str] = None\n")
+            with (
+                self._without_torch_module(),
+                patch.object(sys, "platform", "win32"),
+                patch("importlib.util.find_spec", return_value=spec),
+                patch("tts_mcp.engine._detect_device") as detect,
+            ):
+                self.assertEqual(_detect_device_hint(), "cpu")
+            detect.assert_not_called()
+
+    def test_detect_device_hint_windows_cuda_torch_defers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = self._fake_torch_spec(tmp, "cuda: Optional[str] = '12.8'\n")
+            with (
+                self._without_torch_module(),
+                patch.object(sys, "platform", "win32"),
+                patch("importlib.util.find_spec", return_value=spec),
+                patch("tts_mcp.engine._detect_device", return_value="cuda:0") as detect,
+            ):
+                self.assertEqual(_detect_device_hint(), "cuda:0")
+            detect.assert_called_once_with()
+
+    def test_detect_device_hint_windows_uncertain_torch_defers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, spec in (
+                ("missing package", None),
+                ("missing version stamp", self._fake_torch_spec(tmp)),
+            ):
+                with self.subTest(case=label):
+                    with (
+                        self._without_torch_module(),
+                        patch.object(sys, "platform", "win32"),
+                        patch("importlib.util.find_spec", return_value=spec),
+                        patch("tts_mcp.engine._detect_device", return_value="cuda:0") as detect,
+                    ):
+                        self.assertEqual(_detect_device_hint(), "cuda:0")
+                    detect.assert_called_once_with()
+
+    def test_detect_device_hint_non_windows_defers(self):
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                with (
+                    self._without_torch_module(),
+                    patch.object(sys, "platform", platform),
+                    patch("importlib.util.find_spec") as find_spec,
+                    patch("tts_mcp.engine._detect_device", return_value="mps") as detect,
+                ):
+                    self.assertEqual(_detect_device_hint(), "mps")
+                detect.assert_called_once_with()
+                find_spec.assert_not_called()
+
+    def test_model_status_reports_device_hint(self):
+        with patch("tts_mcp.engine._detect_device_hint", return_value="cuda:0"):
+            status = Engine().model_status()
+        self.assertEqual(status["device"], "cuda:0")
+
+    def test_load_model_tolerates_broken_stderr(self):
+        class BrokenStderr:
+            def write(self, *_args, **_kwargs):
+                raise OSError(9, "Bad file descriptor")
+
+        fake_omnivoice = ModuleType("omnivoice")
+        loaded = FakeModel()
+        fake_omnivoice.OmniVoice = Mock(from_pretrained=Mock(return_value=loaded))
+        engine = Engine()
+        engine._model = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(sys.modules, {"omnivoice": fake_omnivoice}),
+                patch.object(engine, "ensure_model", return_value={"ready": True}),
+                patch("tts_mcp.engine._detect_device", return_value="cpu"),
+                patch("tts_mcp.engine._get_dtype", return_value=None),
+                patch("tts_mcp.engine.DATA_DIR", Path(tmp)),
+                patch.object(sys, "stderr", BrokenStderr()),
+            ):
+                engine._load_model()
+
+            self.assertIs(engine._model, loaded)
+            events = desktop_diagnostics.events(Path(tmp))
+            self.assertEqual(len(events), 2)
+            for event in events:
+                self.assertEqual(event["category"], "stderr_write_failed")
+                self.assertEqual(event["error_type"], "OSError")
+                self.assertIn("errno=9", event["message"])
+                self.assertIn("strerror=Bad file descriptor", event["message"])
+        engine._model = None
 
     def test_storage_creates_production_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

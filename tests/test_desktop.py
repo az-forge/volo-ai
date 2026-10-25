@@ -1978,6 +1978,85 @@ class DesktopWorkerTests(unittest.TestCase):
         self.assertIsInstance(event["duration_ms"], int)
         self.assertNotIn(home_path, json.dumps(report))
 
+    def test_failed_request_records_safe_os_error_details(self):
+        engine = Mock()
+        error = OSError(9, "Bad file descriptor", str(Path.home() / "model" / "config.json"))
+        error.winerror = 6
+        engine.ensure_model.side_effect = error
+
+        response = dispatch_request(
+            {"id": "os-fail", "type": "prepare_model", "provider": "omnivoice"},
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertEqual(event["error_type"], "OSError")
+        self.assertIn("errno=9", event["message"])
+        self.assertIn("winerror=6", event["message"])
+        self.assertIn("strerror=Bad file descriptor", event["message"])
+        self.assertNotIn("config.json", event["message"])
+        self.assertNotIn(str(Path.home()), json.dumps(report))
+
+    def test_failed_request_records_wrapped_os_error_cause(self):
+        engine = Mock()
+        wrapped = RuntimeError("model load failed")
+        wrapped.__cause__ = OSError(28, "No space left on device", "/secret/model.bin")
+        engine.generate.side_effect = wrapped
+
+        response = dispatch_request(
+            {
+                "id": "wrapped-os",
+                "type": "synthesize",
+                "provider": "omnivoice",
+                "text": "hello",
+            },
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertEqual(event["error_type"], "RuntimeError")
+        self.assertIn("RuntimeError", event["message"])
+        self.assertIn("caused by OSError", event["message"])
+        self.assertIn("errno=28", event["message"])
+        self.assertIn("strerror=No space left on device", event["message"])
+        self.assertNotIn("model.bin", event["message"])
+
+    def test_prepare_model_wrapped_os_error_does_not_record_formatted_path(self):
+        engine = Mock()
+        filename = str(Path.home() / "models" / "broken.bin")
+        cause = OSError(2, "No such file or directory", filename)
+        wrapped = RuntimeError(f"Model load failed: {cause}")
+        wrapped.__cause__ = cause
+        engine.ensure_model.side_effect = wrapped
+
+        response = dispatch_request(
+            {"id": "wrapped-prepare", "type": "prepare_model", "provider": "omnivoice"},
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertIn("caused by FileNotFoundError", event["message"])
+        self.assertIn("errno=2", event["message"])
+        self.assertNotIn("broken.bin", json.dumps(report))
+
     def test_save_and_delete_voice_requests(self):
         engine = Mock()
         engine.save_voice.return_value = "/tmp/demo.pt"

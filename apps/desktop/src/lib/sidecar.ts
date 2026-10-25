@@ -459,6 +459,7 @@ export class SidecarClient {
         "sidecar_exit",
         "sidecar_start_failed",
         "sidecar_stderr",
+        "stderr_write_failed",
         "runtime_cpu_fallback",
       ].includes(event.category);
       return {

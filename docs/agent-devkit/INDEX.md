@@ -2,6 +2,7 @@
 
 ## Archived changes
 
+- [Safe OS error details in diagnostics — Issue #21](changes/archive/2026-10-25-21-os-error-diagnostics/delta.md)
 - [First-run model diagnostics — Issue #15](changes/archive/2026-10-24-15-first-run-diagnostics/delta.md)
 - [Desktop responsiveness and resource visibility](changes/archive/2026-10-23-desktop-perf-visibility/design.md) — [tasks](changes/archive/2026-10-23-desktop-perf-visibility/tasks.md), [wiki delta](changes/archive/2026-10-23-desktop-perf-visibility/delta.md)
 - [Ship the desktop sidecar as PyInstaller onedir](changes/archive/2026-10-23-sidecar-onedir/design.md) — [tasks](changes/archive/2026-10-23-sidecar-onedir/tasks.md)

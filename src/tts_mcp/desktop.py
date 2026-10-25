@@ -86,6 +86,23 @@ def _error(request_id: str, code: str, message: str) -> dict[str, Any]:
     }
 
 
+def _chained_os_error_message(exc: BaseException) -> str | None:
+    """Return safe OS details for an OSError wrapped by ``exc``, else None.
+
+    Walks ``__cause__``/``__context__`` so an exception raised from an OSError
+    keeps the underlying errno/winerror/strerror without its filename.
+    """
+    seen = {id(exc)}
+    current = exc.__cause__ or exc.__context__
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = desktop_diagnostics.os_error_message(current)
+        if message is not None:
+            return message
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _record_dispatch_failure(
     operation: Any,
     code: str,
@@ -103,12 +120,21 @@ def _record_dispatch_failure(
         "runtime_install_failed" if operation == "install_nvidia_runtime" else "request_failed"
     )
     stack = "".join(traceback.format_list(traceback.extract_tb(exc.__traceback__)))[-12_000:]
+    message = desktop_diagnostics.os_error_message(exc)
+    if message is None:
+        cause = _chained_os_error_message(exc)
+        if cause is not None:
+            message = f"{type(exc).__name__}; caused by {cause}"
+        else:
+            message = (
+                str(exc) if operation in {"status", "prepare_model"} else type(exc).__name__
+            )
     desktop_diagnostics.record(
         DATA_DIR,
         category,
         operation=str(operation or "unknown"),
         code=code,
-        message=str(exc) if operation in {"status", "prepare_model"} else type(exc).__name__,
+        message=message,
         traceback=stack,
         request_id=request_id,
         provider=provider,

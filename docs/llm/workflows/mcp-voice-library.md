@@ -294,6 +294,9 @@ directory, profile writes and deletions affect the desktop library too.
   `audiocpp_cli` binary configured with `TTS_MCP_AUDIOCPP_PATH`.
 - VieNeu reference cloning uses FFmpeg from `PATH` or
   `TTS_MCP_FFMPEG_PATH`. MP3 output also requires the existing `mp3` extra.
+- MP3 conversion honors an explicit FFmpeg path first, then the bundled binary
+  in a packaged desktop sidecar, `TTS_MCP_FFMPEG_PATH`, and `PATH`; source
+  CLI/MCP processes use the configured path or `PATH`.
 - Clone and Design saves replace an existing same-named Clone/Design profile;
   they reject a name already used by a VieNeu preset. `delete_voice` removes
   the profile from the shared store.
@@ -372,16 +375,20 @@ directory, profile writes and deletions affect the desktop library too.
 ## Sources
 
 - `src/tts_mcp/server.py`
+- `src/tts_mcp/api.py`
 - `src/tts_mcp/desktop_vieneu.py`
 - `src/tts_mcp/desktop.py`
 - `src/tts_mcp/engine.py`
 - `src/tts_mcp/cli.py`
 - `src/tts_mcp/convert.py`
+- `scripts/build_sidecar.py`
+- `apps/desktop/src-tauri/tauri.conf.json`
 - `pyproject.toml`
 - `README.md`
 - `apps/desktop/src/lib/sidecar.ts`
 - `apps/desktop/src/App.tsx`
 - `tests/test_server.py`
+- `tests/test_convert.py`
 - `tests/test_desktop.py`
 - `tests/test_desktop_vieneu.py`
 - `tests/test_engine.py`

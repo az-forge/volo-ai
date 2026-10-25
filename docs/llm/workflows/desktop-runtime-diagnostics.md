@@ -18,7 +18,7 @@ Evidence: `apps/desktop/src/App.tsx`, `apps/desktop/src/lib/sidecar.ts`, `src/tt
 
 ### DSET-local-diagnostics
 
-The desktop app SHALL retain bounded local diagnostic events, make Logs and user-triggered export available from first-run setup before providers are ready, and include sanitized failed-request context in home-path-redacted reports without request payloads or generated content.
+The desktop app SHALL retain bounded local diagnostic events, make Logs and user-triggered export available from first-run setup before providers are ready, include sanitized failed-request context in home-path-redacted reports without request payloads or generated content, and keep nonessential model-load stderr logging from aborting synthesis.
 
 #### Scenario: Open Logs during setup
 
@@ -32,7 +32,19 @@ The desktop app SHALL retain bounded local diagnostic events, make Logs and user
 - WHEN the user chooses Export
 - THEN the report includes its timestamp, operation, request ID, provider and last-known setup stage or asset when available, error code, sanitized error message, elapsed time, and sanitized stack details, while excluding request payloads, synthesized text, audio, and voice content
 
-Evidence: `apps/desktop/src/App.tsx`, `apps/desktop/src/lib/diagnostics.ts`, `apps/desktop/src/lib/sidecar.ts`, `src/tts_mcp/desktop.py`, `src/tts_mcp/desktop_diagnostics.py`, `tests/test_desktop_diagnostics.py`
+#### Scenario: Failed request raises an OS error
+
+- GIVEN a failed request whose exception is an OSError, or whose exception was raised from an OSError
+- WHEN the user exports diagnostics
+- THEN the event's error message retains only safe OS details — errno, the Windows winerror code when present, and the OS strerror text — and never the exception's filename, request content, or full exception formatting
+
+#### Scenario: stderr is unavailable during model load
+
+- GIVEN the sidecar's stderr stream raises OSError when written
+- WHEN the OmniVoice engine logs its nonessential model-load lines
+- THEN loading continues, and each failed stderr write is itself recorded as a bounded local diagnostic event
+
+Evidence: `apps/desktop/src/App.tsx`, `apps/desktop/src/lib/diagnostics.ts`, `apps/desktop/src/lib/sidecar.ts`, `src/tts_mcp/desktop.py`, `src/tts_mcp/desktop_diagnostics.py`, `src/tts_mcp/engine.py`, `tests/test_desktop_diagnostics.py`, `tests/test_desktop.py`, `tests/test_engine.py`
 
 ## Flow
 
@@ -89,14 +101,19 @@ frontend events in an explicitly incomplete report.
   and 1 MB. Frontend diagnostics are stored separately in browser local storage,
   bounded to 500 events and 1 MB. Sidecar stderr bursts are deduplicated to one
   recorded event per five-second window, and the next recorded message notes
-  how many similar messages were suppressed.
+  how many similar messages were suppressed. The Logs list marks a failed
+  stderr write as an error.
 - Export creates a JSON file only at the path selected by the user. Clearing
   Logs clears both local histories.
 - Failed request events retain the operation, request ID, error code and type,
   elapsed time, and, for model preparation, the provider and latest preparation
   phase and asset when available. Detailed error messages are retained for
   `status` and `prepare_model`; other request failures retain the exception type
-  to limit collection of operation input.
+  to limit collection of operation input. For `OSError` failures the message
+  retains only safe OS details — `errno`, the Windows `winerror` code when
+  present, and the OS `strerror` text — never the exception's filename, and a
+  non-OS exception raised from an `OSError` records the same safe details for
+  its cause.
 
 ## Side effects
 
@@ -141,6 +158,9 @@ frontend events in an explicitly incomplete report.
   home directory cannot be resolved, frontend freeform messages, stack details,
   and asset names are omitted from that export and it is marked incomplete.
   Filesystem or diagnostics-store failures are surfaced in Logs.
+- The OmniVoice engine's nonessential model-load stderr lines cannot abort
+  loading or synthesis: a stderr write that raises `OSError` is itself recorded
+  as a `stderr_write_failed` diagnostic event, and loading continues.
 
 ## Tests
 
@@ -151,14 +171,18 @@ frontend events in an explicitly incomplete report.
   health-check selection, and managed removal scope.
 - `tests/test_desktop_diagnostics.py` checks bounded persistence, home-path
   redaction, failed-request context in reports, export field exclusions,
-  clearing, and write failures.
+  clearing, write failures, and safe OS error message details.
+- `tests/test_engine.py` checks that OmniVoice model loading continues and
+  records a `stderr_write_failed` event when the stderr stream raises
+  `OSError`.
 - `tests/test_package_cuda_runtime.py` checks onedir PAX archiving, splitting,
   part and archive hashes, unsafe archive rejection, release target validation,
   and missing installer targets.
 - `tests/test_build_sidecar.py` checks the onedir staging layout with the
   audio.cpp CLI inside the folder, Windows executable naming, and the CUDA
   build's onedir tree staged outside Tauri without audio.cpp.
-- `tests/test_desktop.py` checks failed model-preparation context and JSONL
+- `tests/test_desktop.py` checks failed model-preparation context, safe
+  `OSError` and wrapped-cause details in failed-request events, and JSONL
   cancellation of an optional runtime install.
 
 ## Related
@@ -175,11 +199,13 @@ frontend events in an explicitly incomplete report.
 - `src/tts_mcp/desktop.py`
 - `src/tts_mcp/desktop_runtime.py`
 - `src/tts_mcp/desktop_diagnostics.py`
+- `src/tts_mcp/engine.py`
 - `tests/test_build_sidecar.py`
 - `tests/test_package_cuda_runtime.py`
 - `tests/test_desktop.py`
 - `tests/test_desktop_runtime.py`
 - `tests/test_desktop_diagnostics.py`
+- `tests/test_engine.py`
 - `apps/desktop/src/App.tsx`
 - `apps/desktop/src/lib/sidecar.ts`
 - `apps/desktop/src/lib/diagnostics.ts`

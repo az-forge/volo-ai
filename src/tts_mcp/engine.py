@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -469,6 +470,43 @@ def _detect_device() -> str:
     return "cpu"
 
 
+def _torch_cuda_build(origin: str) -> bool | None:
+    """Return whether the installed torch is a CUDA build, without importing it.
+
+    Reads the build stamp PyTorch ships in torch/version.py. None means the
+    stamp is missing or unparseable — an uncertain case for the caller.
+    """
+    try:
+        source = Path(origin).with_name("version.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^cuda\b[^=\n]*=\s*['\"]?([^'\"\s]+)", source, re.M)
+    if match is None:
+        return None
+    return match.group(1) != "None"
+
+
+def _detect_device_hint() -> str:
+    """Return the _detect_device result without paying torch's import cost.
+
+    Status probes call this so a cold first request does not block on loading
+    hundreds of MB of torch libraries. The shortcut is sound only where no
+    accelerator can exist — the packaged Windows desktop sidecar installs a
+    CPU-only torch (PyPI's win_amd64 wheel stamps version.py cuda = None) —
+    so every other platform or uncertain package state defers to exact
+    detection.
+    """
+    if "torch" in sys.modules or sys.platform != "win32":
+        return _detect_device()
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is None or spec.origin is None or _torch_cuda_build(spec.origin) is not False:
+        return _detect_device()
+    return "cpu"
+
+
 def _get_dtype():
     """Get optimal dtype for the device."""
     try:
@@ -526,6 +564,29 @@ def _process_peak_rss() -> int | None:
     return int(usage if sys.platform == "darwin" else usage * 1024)
 
 
+def _record_stderr_failure(exc: OSError) -> None:
+    """Persist a failed stderr write through bounded diagnostics; never raise."""
+    try:
+        from tts_mcp import desktop_diagnostics
+
+        desktop_diagnostics.record(
+            DATA_DIR,
+            "stderr_write_failed",
+            message=desktop_diagnostics.os_error_message(exc) or type(exc).__name__,
+            error_type=type(exc).__name__,
+        )
+    except Exception:
+        pass
+
+
+def _log_stderr(message: str) -> None:
+    """Write a nonessential progress line; a broken stderr must not abort."""
+    try:
+        print(message, file=sys.stderr)
+    except OSError as exc:
+        _record_stderr_failure(exc)
+
+
 class Engine:
     """Singleton OmniVoice engine wrapper with lazy loading."""
 
@@ -560,10 +621,7 @@ class Engine:
         if dtype is not None:
             kwargs["dtype"] = dtype
 
-        print(
-            f"[tts-mcp] Loading OmniVoice on {device} ({dtype})...",
-            file=sys.stderr,
-        )
+        _log_stderr(f"[tts-mcp] Loading OmniVoice on {device} ({dtype})...")
         kwargs.update(
             {
                 "load_asr": True,
@@ -574,7 +632,7 @@ class Engine:
         with self._model_lock:
             if self._model is None:
                 self._model = OmniVoice.from_pretrained(str(MODEL_DIR), **kwargs)
-        print("[tts-mcp] Model loaded.", file=sys.stderr)
+        _log_stderr("[tts-mcp] Model loaded.")
 
     def model_status(self) -> dict[str, Any]:
         """Return whether all assets needed for offline generation are ready."""
@@ -586,7 +644,7 @@ class Engine:
         )
         return {
             "ready": ready,
-            "device": _detect_device(),
+            "device": _detect_device_hint(),
             "model": MODEL_ID,
             "tokenizer": TOKENIZER_ID,
             "asr_model": ASR_ID,

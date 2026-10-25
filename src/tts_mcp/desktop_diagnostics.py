@@ -183,6 +183,27 @@ def _token(value: str) -> str:
     return _SAFE_TOKEN.sub("_", str(value))[:80] or "unknown"
 
 
+def os_error_message(exc: BaseException) -> str | None:
+    """Return bounded OS error details for an OSError, else None.
+
+    ``str(exc)`` is never used: OSError formatting can embed its ``filename``,
+    which may hold user paths or request data. Only ``errno``, ``winerror``
+    when the platform provides it, and the OS ``strerror`` text are kept.
+    """
+    if not isinstance(exc, OSError):
+        return None
+    details = []
+    if exc.errno is not None:
+        details.append(f"errno={exc.errno}")
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        details.append(f"winerror={winerror}")
+    if exc.strerror:
+        details.append(f"strerror={exc.strerror}")
+    label = type(exc).__name__
+    return f"{label} ({', '.join(details)})" if details else label
+
+
 _EVENTS_CACHE: dict[tuple, list[dict[str, Any]]] = {}
 _EVENTS_CACHE_LIMIT = 8
 

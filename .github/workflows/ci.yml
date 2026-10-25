@@ -61,7 +61,11 @@ jobs:
         run: |
           # Model runtimes are lazy imports; unit tests only need these dependencies.
           python -m pip install --editable . --no-deps
-          python -m pip install 'mcp==2.3.0' 'numpy>=1.24.0' 'soundfile>=0.12.0'
+          python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -c requirements-linux-cpu.txt \
+            'mcp==2.3.0' 'numpy>=1.24.0' 'soundfile>=0.12.0' \
+            'huggingface_hub>=0.30.0' 'yt-dlp>=2026.8.19' 'packaging' \
+            'torch==2.10.0+cpu'
 
       - name: Run Python tests and compile check
         run: |

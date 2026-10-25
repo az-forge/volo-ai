@@ -63,6 +63,42 @@ folder name according to the
 [using-devkit workflow](.agents/skills/using-devkit/SKILL.md), and reference
 the issue in the pull request.
 
+Reference the issue number in commit messages (`Refs #<number>` for partial
+work). When a pull request fully resolves the issue, write `Closes #<number>`
+in the PR body so GitHub closes it on merge; when work completes without a
+pull request, close it with `gh issue close <number> --comment "<result>"`.
+Keep the issue open while any of its scope remains unmerged.
+
+## Devin CLI delegation
+
+The coordinating agent owns the final result: plan adherence, acceptance
+criteria, review, and evidence. Delegate all suitable research,
+implementation, tests, documentation, and repairs to the local Devin CLI to
+reduce coordinator quota. Use model `swe-2-max` (preferred because the user
+wants to use their free allowance; do not assume it is permanently free) and
+permission mode `dangerous`. Do not delegate on `swe-2-max` once the free
+allowance is gone or unknown; ask the user before running a paid model.
+
+```sh
+rtk proxy devin --model swe-2-max --permission-mode dangerous -p "<task prompt>"
+rtk proxy devin --model swe-2-max --permission-mode dangerous --resume SESSION_ID -p "<follow-up prompt>"
+```
+
+When delegating, give the executor the issue or approved plan, scope,
+acceptance criteria, existing changes to preserve, and verification
+commands. Ask it to report changed files, checks run, remaining issues, and
+its session ID. Afterwards, inspect the final diff and check evidence
+yourself — never accept a self-report as proof — and return precise defects
+to the same Devin session via `--resume`, repeating repair and verification
+until done.
+
+Ask the user when requirements are uncertain or a change goes beyond the
+plan; routine in-scope repairs continue without repeated approval. Full tool
+permissions stay within the authorized task and do not permit unsolicited
+commits, pushes, deployments, or destructive operations. Devin must not
+recursively delegate to itself. If the CLI, model, or auth is unavailable,
+report the blocker and ask before switching model or taking over execution.
+
 ## Skills
 
 - `brainstorm-feature`: `.agents/skills/brainstorm-feature/SKILL.md`

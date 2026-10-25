@@ -87,7 +87,7 @@ is loaded) without triggering a model load.
 - THEN the response reports the OmniVoice backend, the VieNeu `cpu` backend,
   and the engine's peak RSS, with GPU memory null until a model is loaded
 
-Evidence: `src/tts_mcp/desktop.py`, `src/tts_mcp/engine.py`, `src/tts_mcp/desktop_vieneu.py`, `tests/test_desktop.py`, `tests/test_desktop_vieneu.py`
+Evidence: `src/tts_mcp/desktop.py`, `src/tts_mcp/engine.py`, `src/tts_mcp/desktop_vieneu.py`, `tests/test_desktop.py`, `tests/test_desktop_vieneu.py`, `tests/test_engine.py`
 
 ### DVP-provider-surface
 
@@ -252,7 +252,11 @@ Evidence: `src/tts_mcp/desktop_vieneu.py`, `src/tts_mcp/desktop.py`, `tests/test
    report model, runtime, and preprocessing readiness. Status also reports each
    provider's compute backend — OmniVoice's detected device and VieNeu's
    CPU-only backend — plus best-effort engine peak RSS and GPU memory once a
-   model is loaded, without triggering a model load. MCP provider behavior
+   model is loaded, without triggering a model load. On Windows the packaged
+   sidecar installs PyPI's CPU-only torch, whose `torch/version.py` stamp
+   records no CUDA build, so `status` reports `cpu` from that stamp without
+   importing torch; other platforms and uncertain builds fall back to exact
+   `_detect_device()` detection. MCP provider behavior
    is documented in the [MCP voice library](mcp-voice-library.md).
 2. The user starts one preparation action from the first-run screen. The UI
    sends concurrent `prepare_model` requests only for providers with incomplete
@@ -406,6 +410,10 @@ Evidence: `src/tts_mcp/desktop_vieneu.py`, `src/tts_mcp/desktop.py`, `tests/test
   `--help` launch.
 - `tests/test_cli.py` covers terminal command behavior and VieNeu preset
   profile labels.
+- `tests/test_engine.py` covers the OmniVoice device hint behind `status`: a
+  Windows torch package whose `version.py` stamp records no CUDA build
+  reports `cpu` without importing torch, while CUDA-stamped, uncertain, and
+  non-Windows installs defer to `_detect_device()`.
 
 ## Related
 
@@ -431,3 +439,5 @@ Evidence: `src/tts_mcp/desktop_vieneu.py`, `src/tts_mcp/desktop.py`, `tests/test
 - `pyproject.toml`
 - `tests/test_build_sidecar.py`
 - `tests/test_cli.py`
+- `tests/test_engine.py`
+- `.github/workflows/release.yml`
