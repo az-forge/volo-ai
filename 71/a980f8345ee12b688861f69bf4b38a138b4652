@@ -1,0 +1,185 @@
+release.md
+  s_b74a948254c64a::t_5171906e1ede69 1,5-6,9-11
+  s_e22eb84f1befe3::t_17425873298dc4 12
+  s_bb69a65f6ba5f3::t_5780509fd5c4d8 7-8
+docs/agent-devkit/INDEX.md
+  s_bb69a65f6ba5f3::t_33884271c8c053 5
+AGENTS.md
+  s_cac5e017a50f8b::t_ef9ea15f311f4f 72-78,81-101
+  s_ff3c12a2e71b41::t_2b3df3b885bd10 79-80
+  s_ff3c12a2e71b41::t_76350f55bd923f 66-71
+.github/workflows/ci.yml
+  s_00f76e17473ef6::t_5bc16007cca395 64-68
+apps/desktop/src/lib/sidecar.ts
+  s_5ebb194958a8cb::t_0a64ff9013826e 462
+src/tts_mcp/desktop_diagnostics.py
+  s_bb69a65f6ba5f3::t_4154d2226c918c 186-206
+apps/desktop/src-tauri/Cargo.toml
+  s_b74a948254c64a::t_e8ed39e4c5dc87 3
+docs/llm/workflows/mcp-voice-library.md
+  s_8d886637c8488e::t_6ce0372fedb28e 297-299
+  s_8d886637c8488e::t_60b19551e8532b 378,384-385,391
+changelog.md
+  s_e22eb84f1befe3::t_16d5d04b111469 14
+  s_bb69a65f6ba5f3::t_81c7ad63592cc0 9-10
+  s_b74a948254c64a::t_6d9ccf03ea596f 3-8,11-13,15
+docs/llm/workflows/desktop-runtime-diagnostics.md
+  s_bb69a65f6ba5f3::t_f67e6ef00afa9d 174-177
+  s_bb69a65f6ba5f3::t_ab158641a6c6b2 21,35-47
+  s_bb69a65f6ba5f3::t_c5ef5680b9d521 202
+  s_bb69a65f6ba5f3::t_ccc4f6a72f9d77 184-185
+  s_bb69a65f6ba5f3::t_124b9e7137a70e 161-163
+  s_5ebb194958a8cb::t_0a64ff9013826e 104-105
+  s_bb69a65f6ba5f3::t_aae8609fe789fe 112-116
+  s_bb69a65f6ba5f3::t_7ef395d7c3629d 208
+src/tts_mcp/convert.py
+  s_4e72c6b949d8ad::t_4b2a8137b0aedc 5,7,15-37
+  s_4e72c6b949d8ad::t_ffa0884d00e2b2 71-72
+  s_8d886637c8488e::t_68d62f2e9fd723 38-39
+src/tts_mcp/engine.py
+  s_00f76e17473ef6::t_ed53a489d14862 647
+  s_00f76e17473ef6::t_033a16599af5db 5
+  s_00f76e17473ef6::t_7e6feadfb4de76 479-481,483,487-492,498,500-504,507-509
+  s_bb69a65f6ba5f3::t_f8cb0b7eb592bb 567-589
+  s_b2ffeac1b3a7e5::t_629e6ef10d9a6d 473-478,482,484-486,493-497,499,505-506
+  s_bb69a65f6ba5f3::t_684bc0eff5331f 624,635
+apps/desktop/package.json
+  s_b74a948254c64a::t_7d04fa62eb8456 3
+apps/desktop/src-tauri/tauri.conf.json
+  s_b74a948254c64a::t_eb3facd50a61d1 4
+tests/test_engine.py
+  s_bb69a65f6ba5f3::t_61573cde1ae8bb 17
+  s_bb69a65f6ba5f3::t_5b226e3732ba63 393-424
+  s_b2ffeac1b3a7e5::t_d616b7ced59cf8 382
+  s_00f76e17473ef6::t_3fc466489da86e 1,4,12,18-23
+  s_00f76e17473ef6::t_cb24e758214510 308-317,319-322,325-334,336,338-339,341,343,346,348-351,353,355,358,360,364,374,387-392
+  s_b2ffeac1b3a7e5::t_5c4b6cb14eb8d7 318,323-324,335,337,340,342,344-345,347,352,354,356-357,359,361-363,365-369,371-373,375-381,383-386
+  s_b2ffeac1b3a7e5::t_aeff6e3d7bca79 370
+docs/llm/workflows/desktop-vieneu.md
+  s_3095a3c348c2a2::t_799be1b8ceaab0 90
+  s_3095a3c348c2a2::t_6fa0944d70f2ba 413-416
+  s_3095a3c348c2a2::t_00071e6c90bfb0 255-259
+  s_3095a3c348c2a2::t_cc53ceb2f5630b 442-443
+tests/test_desktop_diagnostics.py
+  s_bb69a65f6ba5f3::t_65d63f3f7cfefe 97,100-103,107-122
+  s_bb69a65f6ba5f3::t_9cc2cb10cf4bf8 98-99,104-106
+tests/test_desktop.py
+  s_5ebb194958a8cb::t_a0b9a3f3c38911 2056,2058
+  s_bb69a65f6ba5f3::t_56216c5885156c 2000-2002
+  s_5ebb194958a8cb::t_ba9085a88a86c3 2036-2055,2057,2059
+  s_bb69a65f6ba5f3::t_07c7e944cc40ab 1983-1984
+  s_bb69a65f6ba5f3::t_df77bea404c220 1981-1982,1985-1999,2003-2035
+src/tts_mcp/desktop.py
+  s_5ebb194958a8cb::t_b8cd0ae4467d05 127-131
+  s_bb69a65f6ba5f3::t_b7a1475976b160 89-105,123-126,137
+apps/desktop/package-lock.json
+  s_60e94f5312d3ba::t_422a5ceb57d2c2 3,9
+apps/desktop/src-tauri/Cargo.lock
+  s_60e94f5312d3ba::t_c30bf5d39343d1 3994
+docs/agent-devkit/changes/archive/2026-10-25-21-os-error-diagnostics/delta.md
+  s_5ebb194958a8cb::t_7db462db586306 1-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "71a980f8345ee12b688861f69bf4b38a138b4652",
+  "prompts": {},
+  "sessions": {
+    "s_00f76e17473ef6": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "stitch-rule",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_3095a3c348c2a2": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "triangular-grain",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_4e72c6b949d8ad": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "proud-brazil",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_5ebb194958a8cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16c5c-c00c-7f92-a6dd-d7e6e83c8340",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_60e94f5312d3ba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16c20-85f1-7800-942d-192117a8036b",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_8d886637c8488e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a171ee-966e-7a80-aed9-1358eea9a54e",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_b2ffeac1b3a7e5": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "wide-truck",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_b74a948254c64a": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "fortunate-rice",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_bb69a65f6ba5f3": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "recondite-mars",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_cac5e017a50f8b": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "pumped-spectacles",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_e22eb84f1befe3": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "rare-diplodocus",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_ff3c12a2e71b41": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "viridian-mask",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    }
+  }
+}
