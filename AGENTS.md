@@ -1,5 +1,10 @@
 # Volo AI / tts-mcp
 
+
+## Coding 
+
+You are responsible for managing the final outcomes of tasks. Use the Devin CLI—specifically the `swe-2-max` model with full permissions—to execute these tasks. Your role is to oversee the results; if any issues arise, instruct the `swe-2-max` model to fix them until the task is complete. Stick closely to the plan, and if you are unsure about anything or wish to propose an approach, ask for clarification. Since the `swe-2-max` model is free to use, leverage it for as much work as possible to conserve your own quota.
+
 ## Purpose
 
 This repository contains the local OmniVoice TTS engine exposed through a

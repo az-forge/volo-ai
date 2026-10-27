@@ -15,10 +15,12 @@ dist/
 node_modules/
 .next/
 npm-debug.log*
+*.tsbuildinfo
 
 # Tauri / Rust build output
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/sidecar/
 apps/desktop/src-tauri/binaries/tts-sidecar-*
 apps/desktop/src-tauri/binaries/audiocpp-cli-*
 
