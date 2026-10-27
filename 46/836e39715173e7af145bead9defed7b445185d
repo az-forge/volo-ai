@@ -1,0 +1,41 @@
+.gitignore
+  s_1009a2c9885616::t_1bd50eb845730e 18
+  s_1009a2c9885616::t_e7edd30329a32c 23
+scripts/build_local_common.sh
+  s_20e8f53b272819::t_7fbfd62148d3fe 118-124
+  s_d30158534053ca::t_e5b6596baa0979 1-117,125-318
+AGENTS.md
+  s_d30158534053ca::t_ef53b47d67b703 3-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46836e39715173e7af145bead9defed7b445185d",
+  "prompts": {},
+  "sessions": {
+    "s_1009a2c9885616": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "destiny-hawthorn",
+        "model": "unknown"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    },
+    "s_20e8f53b272819": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "lumbar-tricorne",
+        "model": "unknown"
+      },
+      "human_author": null
+    },
+    "s_d30158534053ca": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a178bc-de72-73b1-9f08-d440143c3ae4",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "asta-nguyen <asta.dev.520@gmail.com>"
+    }
+  }
+}
