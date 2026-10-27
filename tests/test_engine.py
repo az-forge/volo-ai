@@ -1,15 +1,26 @@
+import importlib.util
 import json
 import sqlite3
+import sys
 import tempfile
+import threading
+import time
 import unittest
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from tts_mcp.engine import Engine, validate_language
+from tts_mcp import desktop_diagnostics
+from tts_mcp.engine import (
+    DownloadCancelled,
+    Engine,
+    _detect_device_hint,
+    validate_language,
+)
 
 
 class FakeModel:
@@ -189,6 +200,76 @@ class EngineTests(unittest.TestCase):
             if key != "text":
                 self.assertEqual(model.kwargs[key], value)
 
+    def test_generate_cancels_while_waiting_for_inference_lock(self):
+        model = FakeModel()
+        engine = Engine()
+        engine._model = model
+        engine._inference_lock.acquire()
+        cancel = threading.Event()
+        errors = []
+
+        def call():
+            try:
+                engine.generate("hello", should_cancel=cancel.is_set)
+            except DownloadCancelled as exc:
+                errors.append(str(exc))
+
+        thread = threading.Thread(target=call)
+        try:
+            thread.start()
+            time.sleep(0.3)
+            cancel.set()
+            thread.join(timeout=3)
+        finally:
+            engine._inference_lock.release()
+            thread.join(timeout=3)
+
+        self.assertEqual(errors, ["Synthesis cancelled"])
+        self.assertIsNone(model.kwargs)
+
+    def test_download_progress_throttled_but_cancellation_checked_every_update(self):
+        from tts_mcp.engine import _download_asset
+
+        events = []
+        cancel_checks = []
+        ticks = iter(i * 0.01 for i in range(200))
+
+        def fake_download(*, tqdm_class, **_kwargs):
+            bar = tqdm_class(total=50)
+            for _ in range(50):
+                bar.update(1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("huggingface_hub.snapshot_download", side_effect=fake_download),
+                patch("tts_mcp.engine.time.monotonic", side_effect=lambda: next(ticks)),
+            ):
+                _download_asset(
+                    "repo",
+                    Path(tmp) / "dest",
+                    on_progress=events.append,
+                    should_cancel=lambda: cancel_checks.append(1) or False,
+                )
+
+        self.assertEqual(len(cancel_checks), 50)
+        self.assertEqual(events[0]["progress"], 0.0)
+        self.assertLessEqual(len(events), 7)
+        self.assertGreaterEqual(len(events), 3)
+        self.assertEqual(events[-1]["progress"], 1.0)
+
+    def test_generate_releases_inference_lock_on_model_error(self):
+        class FailingModel(FakeModel):
+            def generate(self, **kwargs):
+                self.kwargs = kwargs
+                raise RuntimeError("boom")
+
+        engine = Engine()
+        engine._model = FailingModel()
+        with self.assertRaises(RuntimeError):
+            engine.generate("hello")
+        self.assertTrue(engine._inference_lock.acquire(timeout=0.1))
+        engine._inference_lock.release()
+
     def test_language_boundary_accepts_only_supported_languages(self):
         self.assertEqual(validate_language("en"), "en")
         self.assertEqual(validate_language("vi"), "vi")
@@ -223,6 +304,123 @@ class EngineTests(unittest.TestCase):
                 status = Engine().model_status()
 
         self.assertTrue(status["ready"])
+
+    @staticmethod
+    def _without_torch_module():
+        modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name != "torch" and not name.startswith("torch.")
+        }
+        return patch.object(sys, "modules", modules)
+
+    @staticmethod
+    def _fake_torch_spec(directory: str, version_source: str | None = None):
+        package = Path(directory) / "torch"
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text("")
+        if version_source is not None:
+            (package / "version.py").write_text(version_source)
+        return importlib.util.spec_from_file_location("torch", init)
+
+    def test_detect_device_hint_uses_torch_when_loaded(self):
+        with (
+            patch.dict(sys.modules, {"torch": ModuleType("torch")}),
+            patch("tts_mcp.engine._detect_device", return_value="mps") as detect,
+        ):
+            self.assertEqual(_detect_device_hint(), "mps")
+        detect.assert_called_once_with()
+
+    def test_detect_device_hint_windows_cpu_torch_skips_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = self._fake_torch_spec(tmp, "cuda: Optional[str] = None\n")
+            with (
+                self._without_torch_module(),
+                patch.object(sys, "platform", "win32"),
+                patch("importlib.util.find_spec", return_value=spec),
+                patch("tts_mcp.engine._detect_device") as detect,
+            ):
+                self.assertEqual(_detect_device_hint(), "cpu")
+            detect.assert_not_called()
+
+    def test_detect_device_hint_windows_cuda_torch_defers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = self._fake_torch_spec(tmp, "cuda: Optional[str] = '12.8'\n")
+            with (
+                self._without_torch_module(),
+                patch.object(sys, "platform", "win32"),
+                patch("importlib.util.find_spec", return_value=spec),
+                patch("tts_mcp.engine._detect_device", return_value="cuda:0") as detect,
+            ):
+                self.assertEqual(_detect_device_hint(), "cuda:0")
+            detect.assert_called_once_with()
+
+    def test_detect_device_hint_windows_uncertain_torch_defers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, spec in (
+                ("missing package", None),
+                ("missing version stamp", self._fake_torch_spec(tmp)),
+            ):
+                with self.subTest(case=label):
+                    with (
+                        self._without_torch_module(),
+                        patch.object(sys, "platform", "win32"),
+                        patch("importlib.util.find_spec", return_value=spec),
+                        patch("tts_mcp.engine._detect_device", return_value="cuda:0") as detect,
+                    ):
+                        self.assertEqual(_detect_device_hint(), "cuda:0")
+                    detect.assert_called_once_with()
+
+    def test_detect_device_hint_non_windows_defers(self):
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                with (
+                    self._without_torch_module(),
+                    patch.object(sys, "platform", platform),
+                    patch("importlib.util.find_spec") as find_spec,
+                    patch("tts_mcp.engine._detect_device", return_value="mps") as detect,
+                ):
+                    self.assertEqual(_detect_device_hint(), "mps")
+                detect.assert_called_once_with()
+                find_spec.assert_not_called()
+
+    def test_model_status_reports_device_hint(self):
+        with patch("tts_mcp.engine._detect_device_hint", return_value="cuda:0"):
+            status = Engine().model_status()
+        self.assertEqual(status["device"], "cuda:0")
+
+    def test_load_model_tolerates_broken_stderr(self):
+        class BrokenStderr:
+            def write(self, *_args, **_kwargs):
+                raise OSError(9, "Bad file descriptor")
+
+        fake_omnivoice = ModuleType("omnivoice")
+        loaded = FakeModel()
+        fake_omnivoice.OmniVoice = Mock(from_pretrained=Mock(return_value=loaded))
+        engine = Engine()
+        engine._model = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(sys.modules, {"omnivoice": fake_omnivoice}),
+                patch.object(engine, "ensure_model", return_value={"ready": True}),
+                patch("tts_mcp.engine._detect_device", return_value="cpu"),
+                patch("tts_mcp.engine._get_dtype", return_value=None),
+                patch("tts_mcp.engine.DATA_DIR", Path(tmp)),
+                patch.object(sys, "stderr", BrokenStderr()),
+            ):
+                engine._load_model()
+
+            self.assertIs(engine._model, loaded)
+            events = desktop_diagnostics.events(Path(tmp))
+            self.assertEqual(len(events), 2)
+            for event in events:
+                self.assertEqual(event["category"], "stderr_write_failed")
+                self.assertEqual(event["error_type"], "OSError")
+                self.assertIn("errno=9", event["message"])
+                self.assertIn("strerror=Bad file descriptor", event["message"])
+        engine._model = None
 
     def test_storage_creates_production_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -770,6 +968,98 @@ class EngineTests(unittest.TestCase):
                         Engine.record_audio_history(**{**valid, key: value})
                 self.assertEqual(Engine.list_audio_history(), [])
 
+    def test_audio_history_rename_preserves_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.storage_patches(Path(tmp)):
+                entry = {
+                    "file_name": "take.wav",
+                    "provider": "omnivoice",
+                    "voice_name": "auto",
+                    "format": "wav",
+                    "text": "hello",
+                    "created_at": "2026-10-08T12:00:00+00:00",
+                }
+                Engine.record_audio_history(**entry)
+
+                self.assertTrue(Engine.rename_audio_history("take.wav", "renamed.wav"))
+                self.assertEqual(
+                    Engine.list_audio_history(), [{**entry, "file_name": "renamed.wav"}]
+                )
+                self.assertFalse(Engine.rename_audio_history("take.wav", "other.wav"))
+                self.assertEqual(
+                    Engine.list_audio_history(), [{**entry, "file_name": "renamed.wav"}]
+                )
+
+    def test_audio_history_rename_rejects_invalid_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.storage_patches(Path(tmp)):
+                entry = {
+                    "file_name": "take.wav",
+                    "provider": "omnivoice",
+                    "voice_name": "auto",
+                    "format": "wav",
+                    "text": "hello",
+                    "created_at": "2026-10-08T12:00:00+00:00",
+                }
+                Engine.record_audio_history(**entry)
+
+                for old_name, new_name in (
+                    ("../take.wav", "renamed.wav"),
+                    ("take.flac", "renamed.wav"),
+                    ("take.wav", "../renamed.wav"),
+                    ("take.wav", "renamed.flac"),
+                    ("take.wav", ""),
+                    ("take.wav", "nested/renamed.wav"),
+                    ("take.wav", "bản.wav"),
+                    ("take.wav", "naïve.wav"),
+                    ("take.wav", "take 🎵.wav"),
+                    ("take.wav", "renamed.part.wav"),
+                    ("bản.wav", "mới.wav"),
+                ):
+                    with self.subTest(old=old_name, new=new_name), self.assertRaises(
+                        ValueError
+                    ):
+                        Engine.rename_audio_history(old_name, new_name)
+                self.assertEqual(Engine.list_audio_history(), [entry])
+
+    def test_audio_history_rename_accepts_unicode_source_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.storage_patches(Path(tmp)):
+                entry = {
+                    "file_name": "bản cũ.wav",
+                    "provider": "omnivoice",
+                    "voice_name": "auto",
+                    "format": "wav",
+                    "text": "hello",
+                    "created_at": "2026-10-08T12:00:00+00:00",
+                }
+                Engine.record_audio_history(**entry)
+
+                self.assertTrue(Engine.rename_audio_history("bản cũ.wav", "ban cu.wav"))
+                self.assertEqual(
+                    Engine.list_audio_history(), [{**entry, "file_name": "ban cu.wav"}]
+                )
+
+    def test_audio_history_rename_collision_keeps_existing_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.storage_patches(Path(tmp)):
+                base = {
+                    "provider": "omnivoice",
+                    "voice_name": "auto",
+                    "format": "wav",
+                    "text": "hello",
+                    "created_at": "2026-10-08T12:00:00+00:00",
+                }
+                Engine.record_audio_history(file_name="take.wav", **base)
+                Engine.record_audio_history(file_name="taken.wav", **base)
+
+                with self.assertRaises(sqlite3.IntegrityError):
+                    Engine.rename_audio_history("take.wav", "taken.wav")
+                self.assertEqual(
+                    [row["file_name"] for row in Engine.list_audio_history()],
+                    ["take.wav", "taken.wav"],
+                )
+
     def test_save_voice_copies_reference_and_persists_metadata(self):
         engine = Engine()
         engine._model = FakeModel()
@@ -1034,10 +1324,53 @@ class EngineTests(unittest.TestCase):
         model._asr_pipe.assert_called_once()
         inputs, kwargs = model._asr_pipe.call_args
         self.assertEqual(kwargs["return_timestamps"], True)
-        self.assertEqual(kwargs["chunk_length_s"], 30)
+        # Chunked decoding merged minutes of speech into one cue; long-form must stay sequential.
+        self.assertNotIn("chunk_length_s", kwargs)
         payload = inputs[0]
         self.assertEqual(payload["sampling_rate"], 16000)
         self.assertEqual(payload["array"].shape, (1600,))
+
+    def test_generation_and_transcription_never_run_concurrently(self):
+        # Concurrent model calls abort the process on MPS (Metal command buffer assertion).
+        import threading
+
+        import torch  # noqa: F401  # first import is slow and would stagger the threads
+
+        engine = Engine()
+        model = Mock()
+        active = []
+        overlap = []
+
+        both_inside = threading.Event()
+
+        def busy(*_args, **_kwargs):
+            active.append(1)
+            overlap.append(len(active))
+            if len(active) == 2:
+                both_inside.set()
+            # Without serialization the other call enters while this one waits here.
+            both_inside.wait(timeout=0.5)
+            active.pop()
+            return [np.zeros(1, dtype=np.float32)]
+
+        # Plain callables: Mock serializes its own calls and would hide the race.
+        model.generate = busy
+        model._asr_pipe = lambda *a, **k: busy() and {"text": "", "chunks": []}
+        with patch.object(engine, "_model", model):
+            threads = [
+                threading.Thread(target=lambda: engine.generate(text="hello")),
+                threading.Thread(
+                    target=lambda: engine.transcribe_with_timestamps(
+                        (np.zeros(1600, dtype=np.float32), 16000)
+                    )
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len(overlap), 2)
+        self.assertEqual(max(overlap), 1)
 
     def test_transcribe_with_timestamps_requires_loaded_pipeline(self):
         engine = Engine()

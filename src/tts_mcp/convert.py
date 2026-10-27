@@ -2,10 +2,39 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
+
+
+def _resolve_ffmpeg() -> str | None:
+    """Locate an FFmpeg executable for MP3 export.
+
+    Checks the PyInstaller bundle (``sys._MEIPASS``), the ``_internal``
+    directory beside a frozen executable, ``TTS_MCP_FFMPEG_PATH``, then PATH.
+    """
+    candidates: list[Path] = []
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    if bundled_root:
+        candidates.append(Path(bundled_root))
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "_internal")
+    for root in candidates:
+        for name in ("ffmpeg", "ffmpeg.exe"):
+            candidate = root / name
+            if candidate.is_file():
+                return str(candidate)
+    env_path = os.environ.get("TTS_MCP_FFMPEG_PATH")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("ffmpeg")
 
 
 def save_audio(
@@ -39,8 +68,8 @@ def _save_mp3(
     sample_rate: int,
     ffmpeg_path: str | None = None,
 ) -> None:
-    """Convert to mp3 via pydub and an explicit ffmpeg executable."""
-    converter = ffmpeg_path or shutil.which("ffmpeg")
+    """Convert to mp3 via pydub and a resolved ffmpeg executable."""
+    converter = ffmpeg_path or _resolve_ffmpeg()
     if not converter:
         raise RuntimeError("MP3 export requires FFmpeg. Install it or provide ffmpeg_path.")
     try:
