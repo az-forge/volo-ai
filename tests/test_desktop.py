@@ -2,6 +2,7 @@ import io
 import json
 import os
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -63,6 +64,7 @@ class DesktopWorkerTests(unittest.TestCase):
             "tokenizer": "tokenizer-id",
             "asr_model": "asr-id",
         }
+        engine.gpu_memory_bytes.return_value = None
 
         response = dispatch_request(
             {"id": "1", "type": "status"}, engine, vieneu_provider=vieneu_provider
@@ -78,6 +80,39 @@ class DesktopWorkerTests(unittest.TestCase):
             "minh_quan_pro",
         )
         self.assertIn("omnivoice", response["result"]["providers"])
+
+    def test_status_reports_backend_and_resource_telemetry(self):
+        engine = Mock()
+        engine.model_status.return_value = {
+            "ready": True,
+            "device": "mps",
+            "model": "model-id",
+            "tokenizer": "tokenizer-id",
+            "asr_model": "asr-id",
+        }
+        engine.gpu_memory_bytes.return_value = None
+        vieneu_provider = Mock()
+        vieneu_provider.status.return_value = {
+            "model_ready": True,
+            "runtime_available": True,
+            "preprocessing_available": True,
+            "preset_voices": [],
+            "unavailable_reason": None,
+        }
+
+        response = dispatch_request(
+            {"id": "s", "type": "status"}, engine, vieneu_provider=vieneu_provider
+        )
+
+        self.assertTrue(response["ok"])
+        result = response["result"]
+        self.assertEqual(result["providers"]["omnivoice"]["backend"], "mps")
+        self.assertEqual(result["providers"]["vieneu"]["backend"], "cpu")
+        if sys.platform == "win32":
+            self.assertIn(result["resources"]["peak_rss_bytes"], (None, int))
+        else:
+            self.assertIsInstance(result["resources"]["peak_rss_bytes"], int)
+        self.assertIsNone(result["resources"]["gpu_memory_bytes"])
 
     def test_prepare_and_synthesis_require_known_provider(self):
         engine = Mock()
@@ -272,7 +307,9 @@ class DesktopWorkerTests(unittest.TestCase):
                 )
 
             self.assertTrue(response["ok"])
-            self.assertEqual(engine.generate.call_args.kwargs["ref_audio"], str(reference))
+            self.assertEqual(
+                engine.generate.call_args.kwargs["ref_audio"], str(reference.resolve())
+            )
             self.assertEqual(engine.generate.call_args.kwargs["ref_text"], "Xin chào")
 
             engine.load_voice_profile.return_value = {
@@ -349,7 +386,7 @@ class DesktopWorkerTests(unittest.TestCase):
         provider.status.return_value = self.ready_vieneu_status(presets)
         calls = []
 
-        def synthesize(request, _voices, _output_dir, output_path=None):
+        def synthesize(request, _voices, _output_dir, output_path=None, should_cancel=None):
             calls.append((request, Path(output_path)))
             self.write_wav(Path(output_path))
             return {"audio_path": str(output_path), "format": "wav"}
@@ -408,7 +445,7 @@ class DesktopWorkerTests(unittest.TestCase):
             provider = Mock()
             provider.status.return_value = self.ready_vieneu_status(presets)
             provider.synthesize.side_effect = (
-                lambda request, _voices, _output_dir, output_path=None: (
+                lambda request, _voices, _output_dir, output_path=None, should_cancel=None: (
                     self.write_wav(Path(output_path))
                     or {"audio_path": str(output_path), "format": "wav"}
                 )
@@ -448,7 +485,7 @@ class DesktopWorkerTests(unittest.TestCase):
         engine = Mock()
         provider = Mock()
         provider.status.return_value = self.ready_vieneu_status(presets)
-        provider.synthesize.side_effect = lambda _request, _voices, _output_dir, output_path=None: (
+        provider.synthesize.side_effect = lambda _request, _voices, _output_dir, output_path=None, should_cancel=None: (
             self.write_wav(Path(output_path)) or {"audio_path": str(output_path), "format": "wav"}
         )
         voices = [{"name": "conflict", "kind": "clone"}]
@@ -474,7 +511,7 @@ class DesktopWorkerTests(unittest.TestCase):
         provider = Mock()
         provider.status.return_value = self.ready_vieneu_status(presets)
         cancelled = threading.Event()
-        provider.synthesize.side_effect = lambda _request, _voices, _output_dir, output_path=None: (
+        provider.synthesize.side_effect = lambda _request, _voices, _output_dir, output_path=None, should_cancel=None: (
             self.write_wav(Path(output_path)) or {"audio_path": str(output_path), "format": "wav"}
         )
         engine.save_vieneu_seed_reference.side_effect = lambda *_args: cancelled.set()
@@ -507,7 +544,7 @@ class DesktopWorkerTests(unittest.TestCase):
                 Path(path).write_bytes(b"audio")
                 return path
 
-            def vieneu_synthesize(_request, _voices, target_dir):
+            def vieneu_synthesize(_request, _voices, target_dir, should_cancel=None):
                 target_dir.mkdir(parents=True, exist_ok=True)
                 path = target_dir / "vieneu.wav"
                 path.write_bytes(b"audio")
@@ -624,27 +661,25 @@ class DesktopWorkerTests(unittest.TestCase):
                 patch("tts_mcp.desktop.OUTPUT_DIR", output_dir),
                 patch.object(Engine, "list_audio_history", return_value=metadata),
             ):
-                first = dispatch_request(
-                    {"id": "history-1", "type": "list_audio_history", "paginated": True},
-                    Mock(),
-                )
-                second = dispatch_request(
-                    {
-                        "id": "history-2",
-                        "type": "list_audio_history",
-                        "paginated": True,
-                        "cursor": first["result"]["next_cursor"],
-                    },
-                    Mock(),
-                )
+                pages = [
+                    dispatch_request(
+                        {
+                            "id": f"history-{page}",
+                            "type": "list_audio_history",
+                            "paginated": True,
+                            "page": page,
+                        },
+                        Mock(),
+                    )
+                    for page in range(1, 4)
+                ]
 
-        self.assertTrue(first["ok"])
-        self.assertTrue(second["ok"])
-        self.assertEqual(first["result"]["total"], 55)
-        self.assertEqual(len(first["result"]["items"]), 50)
-        self.assertEqual(len(second["result"]["items"]), 5)
-        self.assertIsNone(second["result"]["next_cursor"])
-        items = first["result"]["items"] + second["result"]["items"]
+        self.assertTrue(all(response["ok"] for response in pages))
+        self.assertEqual([response["result"]["total"] for response in pages], [55, 55, 55])
+        self.assertEqual([response["result"]["page_count"] for response in pages], [3, 3, 3])
+        self.assertEqual([response["result"]["page"] for response in pages], [1, 2, 3])
+        self.assertEqual([len(response["result"]["items"]) for response in pages], [20, 20, 15])
+        items = [item for response in pages for item in response["result"]["items"]]
         item_ids = [item["id"] for item in items]
         self.assertEqual(item_ids, expected_ids)
         self.assertEqual(len(item_ids), len(set(item_ids)))
@@ -652,13 +687,52 @@ class DesktopWorkerTests(unittest.TestCase):
         self.assertFalse(legacy_item["metadata_available"])
         self.assertIsNone(legacy_item["text"])
 
-    def test_list_audio_history_rejects_invalid_cursor(self):
+    def test_paginated_history_matches_full_listing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "outputs"
+            output_dir.mkdir()
+            base_timestamp = 1_700_000_000
+            for index in range(60):
+                output = output_dir / f"take_{index:02}.wav"
+                output.write_bytes(b"audio")
+                timestamp = base_timestamp + index
+                os.utime(output, (timestamp, timestamp))
+            with patch("tts_mcp.desktop.OUTPUT_DIR", output_dir):
+                full = dispatch_request(
+                    {"id": "full", "type": "list_audio_history"}, Mock()
+                )["result"]["items"]
+                first_page = dispatch_request(
+                    {
+                        "id": "page-1",
+                        "type": "list_audio_history",
+                        "paginated": True,
+                        "page": 1,
+                    },
+                    Mock(),
+                )["result"]
+                pages = [first_page]
+                for page in range(2, first_page["page_count"] + 1):
+                    request = {
+                        "id": f"page-{page}",
+                        "type": "list_audio_history",
+                        "paginated": True,
+                        "page": page,
+                    }
+                    pages.append(dispatch_request(request, Mock())["result"])
+                paged = [item for result in pages for item in result["items"]]
+
+        self.assertEqual(first_page["total"], len(full))
+        self.assertEqual(first_page["page_count"], 3)
+        self.assertEqual([item["id"] for item in paged], [item["id"] for item in full])
+        self.assertEqual(paged, full)
+
+    def test_list_audio_history_rejects_invalid_page(self):
         response = dispatch_request(
             {
                 "id": "history",
                 "type": "list_audio_history",
                 "paginated": True,
-                "cursor": {"created_at": "", "id": "take.wav"},
+                "page": 0,
             },
             Mock(),
         )
@@ -768,20 +842,119 @@ class DesktopWorkerTests(unittest.TestCase):
                         "id": "rename",
                         "type": "rename_audio_history",
                         "file_name": "take.wav",
-                        "new_name": "bản ghi mới",
+                        "new_name": "david hoang",
                     },
                     Mock(),
                 )
 
             self.assertTrue(response["ok"])
-            self.assertEqual(response["result"]["file_name"], "bản ghi mới.wav")
+            self.assertEqual(response["result"]["file_name"], "david hoang.wav")
             self.assertEqual(
                 Path(response["result"]["audio_path"]),
-                (output_dir / "bản ghi mới.wav").resolve(),
+                (output_dir / "david hoang.wav").resolve(),
             )
             self.assertFalse(audio.exists())
-            self.assertTrue((output_dir / "bản ghi mới.wav").is_file())
-            rename_metadata.assert_called_once_with("take.wav", "bản ghi mới.wav")
+            self.assertTrue((output_dir / "david hoang.wav").is_file())
+            rename_metadata.assert_called_once_with("take.wav", "david hoang.wav")
+
+    def test_rename_audio_history_accepts_ascii_digits_hyphens_underscores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "outputs"
+            output_dir.mkdir()
+            with (
+                patch("tts_mcp.desktop.OUTPUT_DIR", output_dir),
+                patch.object(
+                    Engine, "rename_audio_history", return_value=True
+                ) as rename_metadata,
+            ):
+                for new_name in ("file-01", "take_02"):
+                    with self.subTest(new_name=new_name):
+                        source = output_dir / "take.wav"
+                        source.write_bytes(b"audio")
+                        response = dispatch_request(
+                            {
+                                "id": "rename",
+                                "type": "rename_audio_history",
+                                "file_name": "take.wav",
+                                "new_name": new_name,
+                            },
+                            Mock(),
+                        )
+                        self.assertTrue(response["ok"])
+                        self.assertEqual(
+                            response["result"]["file_name"], f"{new_name}.wav"
+                        )
+                        renamed = output_dir / f"{new_name}.wav"
+                        self.assertTrue(renamed.is_file())
+                        renamed.unlink()
+
+            self.assertEqual(rename_metadata.call_count, 2)
+
+    def test_rename_audio_history_rejects_non_ascii_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "outputs"
+            output_dir.mkdir()
+            audio = output_dir / "take.wav"
+            audio.write_bytes(b"audio")
+            with (
+                patch("tts_mcp.desktop.OUTPUT_DIR", output_dir),
+                patch.object(Engine, "rename_audio_history") as rename_metadata,
+            ):
+                for new_name in (
+                    "bản ghi mới",
+                    "đêm nay",
+                    "naïve",
+                    "take 🎵",
+                    "take.v2",
+                    "take,more",
+                ):
+                    with self.subTest(new_name=new_name):
+                        response = dispatch_request(
+                            {
+                                "id": "rename",
+                                "type": "rename_audio_history",
+                                "file_name": "take.wav",
+                                "new_name": new_name,
+                            },
+                            Mock(),
+                        )
+                        self.assertFalse(response["ok"])
+                        self.assertEqual(response["error"]["code"], "invalid_input")
+                        self.assertIn("ASCII", response["error"]["message"])
+
+            self.assertEqual(
+                [path.name for path in output_dir.iterdir()], ["take.wav"]
+            )
+            self.assertEqual(audio.read_bytes(), b"audio")
+            rename_metadata.assert_not_called()
+
+    def test_rename_audio_history_unicode_source_renames_to_ascii(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "outputs"
+            output_dir.mkdir()
+            audio = output_dir / "bản cũ.wav"
+            audio.write_bytes(b"audio")
+            with (
+                patch("tts_mcp.desktop.OUTPUT_DIR", output_dir),
+                patch.object(
+                    Engine, "rename_audio_history", return_value=True
+                ) as rename_metadata,
+            ):
+                response = dispatch_request(
+                    {
+                        "id": "rename",
+                        "type": "rename_audio_history",
+                        "file_name": "bản cũ.wav",
+                        "new_name": "ban cu",
+                    },
+                    Mock(),
+                )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["result"]["file_name"], "ban cu.wav")
+            self.assertFalse(audio.exists())
+            self.assertTrue((output_dir / "ban cu.wav").is_file())
+            rename_metadata.assert_called_once_with("bản cũ.wav", "ban cu.wav")
 
     def test_rename_audio_history_legacy_file_stays_file_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1525,6 +1698,7 @@ class DesktopWorkerTests(unittest.TestCase):
             "tokenizer": "tokenizer-id",
             "asr_model": "asr-id",
         }
+        engine.gpu_memory_bytes.return_value = None
         source = io.StringIO(json.dumps({"id": "1", "type": "status"}) + "\n")
         target = io.StringIO()
 
@@ -1616,7 +1790,9 @@ class DesktopWorkerTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["format"], "wav")
         self.assertEqual(engine.generate.call_args.kwargs["language"], "vi")
-        self.assertEqual(engine.generate.call_args.kwargs["ref_audio"], str(reference))
+        self.assertEqual(
+            engine.generate.call_args.kwargs["ref_audio"], str(reference.resolve())
+        )
         save_audio.assert_called_once()
 
     def test_synthesize_supports_voice_design_and_advanced_config(self):
@@ -1768,6 +1944,119 @@ class DesktopWorkerTests(unittest.TestCase):
             ],
         )
 
+    def test_prepare_model_failure_records_report_context(self):
+        engine = Mock()
+        home_path = str(Path.home())
+
+        def ensure_model(**kwargs):
+            kwargs["on_progress"](
+                {"phase": "download", "asset": "org/omnivoice", "progress": 0.4}
+            )
+            raise RuntimeError(f"Could not load {home_path}/models/omnivoice")
+
+        engine.ensure_model.side_effect = ensure_model
+        response = dispatch_request(
+            {"id": "prepare-27", "type": "prepare_model", "provider": "omnivoice"},
+            engine,
+            emit=lambda _event: None,
+        )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["message"], f"Could not load {home_path}/models/omnivoice")
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertEqual(event["request_id"], "prepare-27")
+        self.assertEqual(event["provider"], "omnivoice")
+        self.assertEqual(event["stage"], "download")
+        self.assertEqual(event["asset"], "org/omnivoice")
+        self.assertEqual(event["error_type"], "RuntimeError")
+        self.assertIn("~/models/omnivoice", event["message"])
+        self.assertIsInstance(event["duration_ms"], int)
+        self.assertNotIn(home_path, json.dumps(report))
+
+    def test_failed_request_records_safe_os_error_details(self):
+        engine = Mock()
+        error = OSError(9, "Bad file descriptor", str(Path.home() / "model" / "config.json"))
+        error.winerror = 6
+        engine.ensure_model.side_effect = error
+
+        response = dispatch_request(
+            {"id": "os-fail", "type": "prepare_model", "provider": "omnivoice"},
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertEqual(event["error_type"], "OSError")
+        self.assertIn("errno=9", event["message"])
+        self.assertIn("winerror=6", event["message"])
+        self.assertIn("strerror=Bad file descriptor", event["message"])
+        self.assertNotIn("config.json", event["message"])
+        self.assertNotIn(str(Path.home()), json.dumps(report))
+
+    def test_failed_request_records_wrapped_os_error_cause(self):
+        engine = Mock()
+        wrapped = RuntimeError("model load failed")
+        wrapped.__cause__ = OSError(28, "No space left on device", "/secret/model.bin")
+        engine.generate.side_effect = wrapped
+
+        response = dispatch_request(
+            {
+                "id": "wrapped-os",
+                "type": "synthesize",
+                "provider": "omnivoice",
+                "text": "hello",
+            },
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertEqual(event["error_type"], "RuntimeError")
+        self.assertIn("RuntimeError", event["message"])
+        self.assertIn("caused by OSError", event["message"])
+        self.assertIn("errno=28", event["message"])
+        self.assertIn("strerror=No space left on device", event["message"])
+        self.assertNotIn("model.bin", event["message"])
+
+    def test_prepare_model_wrapped_os_error_does_not_record_formatted_path(self):
+        engine = Mock()
+        filename = str(Path.home() / "models" / "broken.bin")
+        cause = OSError(2, "No such file or directory", filename)
+        wrapped = RuntimeError(f"Model load failed: {cause}")
+        wrapped.__cause__ = cause
+        engine.ensure_model.side_effect = wrapped
+
+        response = dispatch_request(
+            {"id": "wrapped-prepare", "type": "prepare_model", "provider": "omnivoice"},
+            engine,
+        )
+
+        self.assertFalse(response["ok"])
+        report = desktop_module.desktop_diagnostics.report(
+            desktop_module.DATA_DIR,
+            app_version="0.1.1",
+            runtime={},
+        )
+        event = report["events"][-1]
+        self.assertIn("caused by FileNotFoundError", event["message"])
+        self.assertIn("errno=2", event["message"])
+        self.assertNotIn("broken.bin", json.dumps(report))
+
     def test_save_and_delete_voice_requests(self):
         engine = Mock()
         engine.save_voice.return_value = "/tmp/demo.pt"
@@ -1907,7 +2196,7 @@ class DesktopWorkerTests(unittest.TestCase):
             ]
         )
 
-        def synthesize(_request, _voices, _output_dir, output_path=None):
+        def synthesize(_request, _voices, _output_dir, output_path=None, should_cancel=None):
             started.set()
             if not release.wait(timeout=3):
                 raise RuntimeError("test synth timed out")
@@ -1953,7 +2242,7 @@ class DesktopWorkerTests(unittest.TestCase):
             )
             barrier = threading.Barrier(2)
 
-            def synthesize(_request, _voices, _output_dir, output_path=None):
+            def synthesize(_request, _voices, _output_dir, output_path=None, should_cancel=None):
                 barrier.wait(timeout=3)
                 self.write_wav(Path(output_path))
                 return {"audio_path": str(output_path), "format": "wav"}
@@ -2209,6 +2498,41 @@ class DesktopWorkerTests(unittest.TestCase):
         )
         self.assertIn("could not start", fallback.kwargs["message"])
 
+    def test_main_reconfigures_cp1252_stdio_to_utf8(self):
+        request = json.dumps({"id": "xử-1", "type": "list_voices"}, ensure_ascii=False) + "\n"
+        source = io.TextIOWrapper(io.BytesIO(request.encode("utf-8")), encoding="cp1252")
+        outgoing = io.BytesIO()
+        target = io.TextIOWrapper(outgoing, encoding="cp1252")
+        errors = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        with (
+            patch.object(desktop_module.sys, "stdin", source),
+            patch.object(desktop_module.sys, "stdout", target),
+            patch.object(desktop_module.sys, "stderr", errors),
+            patch.object(desktop_module.sys, "argv", ["desktop.py"]),
+            patch.object(
+                desktop_module.desktop_runtime, "select", return_value=(None, None)
+            ),
+            patch.object(desktop_module, "VieNeuProvider", return_value=Mock()),
+            patch.object(desktop_module, "get_engine", return_value=Mock()),
+            patch.object(
+                desktop_module.Engine,
+                "list_voices",
+                return_value=[{"name": "Giọng ự"}],
+            ),
+        ):
+            desktop_module.main()
+
+        self.assertEqual(source.encoding, "utf-8")
+        self.assertEqual(target.encoding, "utf-8")
+        self.assertEqual(errors.encoding, "utf-8")
+        [response] = [
+            json.loads(line)
+            for line in outgoing.getvalue().decode("utf-8").splitlines()
+        ]
+        self.assertEqual(response["id"], "xử-1")
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["voices"], [{"name": "Giọng ự"}])
+
     def test_protocol_cancels_selected_provider_preparation(self):
         class BlockingProvider:
             def ensure_model(self, on_progress=None, should_cancel=None):
@@ -2273,7 +2597,7 @@ class DesktopWorkerTests(unittest.TestCase):
         engine = Mock()
         self.addCleanup(setattr, desktop_module, "_api_server", None)
         desktop_module._api_server = None
-        with patch.object(desktop_module, "ApiServer", return_value=fake) as factory:
+        with patch("tts_mcp.api.ApiServer", return_value=fake) as factory:
             first = dispatch_request({"id": "s1", "type": "start_api"}, engine)
             second = dispatch_request({"id": "s2", "type": "start_api"}, engine)
             status = dispatch_request({"id": "st", "type": "api_status"}, engine)
@@ -2313,7 +2637,7 @@ class DesktopWorkerTests(unittest.TestCase):
 
         self.addCleanup(setattr, desktop_module, "_api_server", None)
         desktop_module._api_server = None
-        with patch.object(desktop_module, "ApiServer", return_value=ConflictedServer()):
+        with patch("tts_mcp.api.ApiServer", return_value=ConflictedServer()):
             response = dispatch_request({"id": "api", "type": "start_api"}, Mock())
 
         self.assertFalse(response["ok"])
@@ -2391,7 +2715,7 @@ class DesktopWorkerTests(unittest.TestCase):
             target=run_protocol, args=(source, target, BlockingEngine()), daemon=True
         )
         try:
-            with patch.object(desktop_module, "ApiServer", return_value=fake):
+            with patch("tts_mcp.api.ApiServer", return_value=fake):
                 worker.start()
                 source.lines.put(json.dumps({"id": "api", "type": "start_api"}) + "\n")
                 deadline = time.time() + 3
@@ -2414,6 +2738,126 @@ class DesktopWorkerTests(unittest.TestCase):
             release.set()
             worker.join(timeout=5)
         self.assertFalse(worker.is_alive())
+
+    def test_synthesize_worker_lane_status_and_queued_cancel(self):
+        class QueueLines:
+            def __init__(self):
+                self.lines = queue.Queue()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                line = self.lines.get()
+                if line is None:
+                    raise StopIteration
+                return line
+
+        gate = threading.Event()
+        started = threading.Event()
+        lock = threading.Lock()
+
+        engine = Mock()
+        engine.model_status.return_value = {
+            "ready": True,
+            "device": "cpu",
+            "model": "m",
+            "tokenizer": "t",
+            "asr_model": "a",
+        }
+        engine.gpu_memory_bytes.return_value = None
+
+        def generate(*args, should_cancel=None, **kwargs):
+            while not lock.acquire(timeout=0.05):
+                if should_cancel and should_cancel():
+                    raise DownloadCancelled("Synthesis cancelled")
+            try:
+                started.set()
+                if not gate.wait(timeout=10):
+                    raise RuntimeError("test render timed out")
+                return [object()]
+            finally:
+                lock.release()
+
+        engine.generate.side_effect = generate
+        provider = Mock()
+        provider.status.return_value = {
+            "model_ready": True,
+            "runtime_available": True,
+            "preprocessing_available": True,
+            "preset_voices": [],
+            "default_voice": None,
+            "unavailable_reason": None,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "outputs"
+            with (
+                patch("tts_mcp.desktop.OUTPUT_DIR", output_dir),
+                patch(
+                    "tts_mcp.desktop.save_audio",
+                    side_effect=lambda audio, path, **kw: path,
+                ),
+            ):
+                source = QueueLines()
+                target = io.StringIO()
+                worker = threading.Thread(
+                    target=run_protocol,
+                    args=(source, target, engine, provider),
+                    daemon=True,
+                )
+                worker.start()
+                try:
+                    put = lambda request: source.lines.put(json.dumps(request) + "\n")
+                    put(
+                        {
+                            "id": "a",
+                            "type": "synthesize",
+                            "provider": "omnivoice",
+                            "text": "hello",
+                        }
+                    )
+                    self.assertTrue(started.wait(timeout=3))
+                    put(
+                        {
+                            "id": "b",
+                            "type": "synthesize",
+                            "provider": "omnivoice",
+                            "text": "queued",
+                        }
+                    )
+                    put({"id": "s", "type": "status"})
+                    put({"id": "c", "type": "cancel", "request_id": "b"})
+                    source.lines.put(None)
+                    deadline = time.time() + 3
+                    responses = []
+                    while len(responses) < 3 and time.time() < deadline:
+                        time.sleep(0.01)
+                        responses = [
+                            json.loads(line)
+                            for line in target.getvalue().splitlines()
+                            if line.strip()
+                        ]
+                    self.assertGreaterEqual(len(responses), 3)
+                    gate.set()
+                    worker.join(timeout=5)
+                finally:
+                    gate.set()
+
+        self.assertFalse(worker.is_alive())
+        responses = [
+            json.loads(line) for line in target.getvalue().splitlines() if line.strip()
+        ]
+        by_id = {response["id"]: response for response in responses}
+        order = [response["id"] for response in responses]
+        self.assertTrue(by_id["s"]["ok"])
+        self.assertEqual(by_id["s"]["result"]["device"], "cpu")
+        self.assertTrue(by_id["c"]["ok"])
+        self.assertEqual(by_id["c"]["result"], {"cancelled": "b"})
+        self.assertFalse(by_id["b"]["ok"])
+        self.assertEqual(by_id["b"]["error"]["code"], "cancelled")
+        self.assertTrue(by_id["a"]["ok"])
+        self.assertLess(order.index("s"), order.index("a"))
 
     def test_stop_local_api_server_retries_after_stop_failure(self):
         class FlakyApiServer:
@@ -2656,6 +3100,407 @@ class TranscribeVideoTests(unittest.TestCase):
                 "Use --cookies-from-browser or --cookies for the authentication.",
                 "source_blocked",
             ),
+        ):
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(message)
+
+            def factory(options, ydl=ydl):
+                self.track_work_dir(options)
+                return ydl
+
+            response = self.run_transcribe({}, ydl=factory)
+            self.assertFalse(response["ok"], message)
+            self.assertEqual(response["error"]["code"], code, message)
+
+    def test_audio_selector_is_strictly_audio_only(self):
+        captured = []
+        response = self.run_transcribe(
+            {},
+            ydl=lambda options: captured.append(options) or self.fake_ydl(options),
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(len(captured), 1)
+        options = captured[0]
+        self.assertEqual(options["format"], "bestaudio")
+        for forbidden in (
+            "cookiefile",
+            "cookiesfrombrowser",
+            "usenetrc",
+            "username",
+            "password",
+            "extractor_args",
+            "remote_components",
+            "po_token",
+        ):
+            self.assertNotIn(forbidden, options)
+
+    def test_no_audio_only_stream_is_missing_audio(self):
+        import yt_dlp
+
+        def ydl_factory(options):
+            self.track_work_dir(options)
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.extract_info.return_value = {
+                "title": "Demo",
+                "duration": 60,
+                "availability": "public",
+            }
+            ydl.process_ie_result.side_effect = yt_dlp.utils.DownloadError(
+                "Requested format is not available"
+            )
+            return ydl
+
+        response = self.run_transcribe({}, ydl=ydl_factory)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "missing_audio")
+
+    def test_missing_audio_when_nothing_downloaded(self):
+        def ydl(options):
+            return self.fake_ydl(options, downloaded=False)
+
+        response = self.run_transcribe({}, ydl=ydl)
+        # process_ie_result returns a MagicMock without requested_downloads
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "missing_audio")
+
+    def test_ffmpeg_missing_or_failing(self):
+        request = {"id": "r", "type": "transcribe_video", "url": self.YOUTUBE_URL}
+        with (
+            patch("yt_dlp.YoutubeDL", side_effect=lambda o: self.fake_ydl(o)),
+            patch("tts_mcp.desktop._resolve_ffmpeg", return_value=None),
+        ):
+            response = dispatch_request(dict(request), self.engine)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "audio_prepare_failed")
+        with (
+            patch("yt_dlp.YoutubeDL", side_effect=lambda o: self.fake_ydl(o)),
+            patch("subprocess.run", return_value=Mock(returncode=1)),
+            patch("tts_mcp.desktop._resolve_ffmpeg", return_value="/fake/ffmpeg"),
+        ):
+            response = dispatch_request(dict(request), self.engine)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "audio_prepare_failed")
+
+    def test_resolve_ffmpeg_falls_back_to_system_path(self):
+        with (
+            patch.dict("os.environ", {"TTS_MCP_FFMPEG_PATH": ""}),
+            patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+        ):
+            self.assertEqual(desktop_module._resolve_ffmpeg(), "/usr/bin/ffmpeg")
+
+    def test_cancel_before_download(self):
+        response = self.run_transcribe({}, should_cancel=lambda: True)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "cancelled")
+        self.engine.transcribe_with_timestamps.assert_not_called()
+
+    def test_ytdlp_download_cancelled_maps_to_cancelled(self):
+        import yt_dlp
+
+        def ydl_factory(options):
+            self.track_work_dir(options)
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.extract_info.return_value = {
+                "title": "Demo",
+                "duration": 60,
+                "availability": "public",
+            }
+            ydl.process_ie_result.side_effect = yt_dlp.utils.DownloadCancelled("stopped by user")
+            return ydl
+
+        response = self.run_transcribe({}, ydl=ydl_factory)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "cancelled")
+
+    def test_cancel_during_download(self):
+        cancel = {"flag": False}
+
+        def ydl_factory(options):
+            self.track_work_dir(options)
+            ydl = self.fake_ydl(options)
+            hook = options["progress_hooks"][0]
+
+            def download(info, download=True):
+                cancel["flag"] = True
+                hook({"status": "downloading", "downloaded_bytes": 5, "total_bytes": 10})
+                return {"requested_downloads": []}
+
+            ydl.process_ie_result.side_effect = download
+            return ydl
+
+        response = self.run_transcribe({}, ydl=ydl_factory, should_cancel=lambda: cancel["flag"])
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "cancelled")
+
+    def test_asr_failures_and_empty_output(self):
+        cases = (
+            (RuntimeError("boom"), "transcription_failed"),
+            ({"text": "", "chunks": []}, "no_speech"),
+            ({"text": "x", "chunks": "nope"}, "transcription_failed"),
+            (
+                {"text": "x", "chunks": [{"text": "a", "timestamp": ("x", 1)}]},
+                "transcription_failed",
+            ),
+            (
+                {"text": "x", "chunks": [{"text": "a", "timestamp": (2.0, 1.0)}]},
+                "transcription_failed",
+            ),
+            ({"text": "x", "chunks": [{"text": "   ", "timestamp": (0, 1)}]}, "no_speech"),
+        )
+        for result, code in cases:
+            if isinstance(result, Exception):
+                self.engine.transcribe_with_timestamps.side_effect = result
+            else:
+                self.engine.transcribe_with_timestamps.side_effect = None
+                self.engine.transcribe_with_timestamps.return_value = result
+            response = self.run_transcribe({})
+            self.assertFalse(response["ok"], result)
+            self.assertEqual(response["error"]["code"], code, result)
+        self.engine.transcribe_with_timestamps.side_effect = None
+
+    def test_chunk_without_end_uses_duration(self):
+        self.engine.transcribe_with_timestamps.return_value = {
+            "text": "tail",
+            "chunks": [{"text": "tail", "timestamp": (5.0, None)}],
+        }
+        response = self.run_transcribe({})
+        self.assertTrue(response["ok"])
+        self.assertIn("00:00:05,000 --> 00:02:00,000", response["result"]["srt"])
+
+
+class LibraryPathEnvTests(unittest.TestCase):
+    def test_frozen_restores_original_values_and_drops_injected_paths(self):
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "DYLD_LIBRARY_PATH": "/meipass",
+                    "DYLD_LIBRARY_PATH_ORIG": "/user/lib",
+                    "LD_LIBRARY_PATH": "/meipass",
+                },
+                clear=False,
+            ),
+            patch.object(desktop_module.sys, "frozen", True, create=True),
+        ):
+            os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+            desktop_module._restore_library_path_env()
+            self.assertEqual(os.environ["DYLD_LIBRARY_PATH"], "/user/lib")
+            self.assertNotIn("DYLD_LIBRARY_PATH_ORIG", os.environ)
+            self.assertNotIn("LD_LIBRARY_PATH", os.environ)
+
+    def test_unfrozen_process_keeps_environment_untouched(self):
+        with (
+            patch.dict(
+                "os.environ",
+                {"DYLD_LIBRARY_PATH": "/meipass", "DYLD_LIBRARY_PATH_ORIG": "/user/lib"},
+                clear=False,
+            ),
+            patch.object(desktop_module.sys, "frozen", False, create=True),
+        ):
+            desktop_module._restore_library_path_env()
+            self.assertEqual(os.environ["DYLD_LIBRARY_PATH"], "/meipass")
+            self.assertEqual(os.environ["DYLD_LIBRARY_PATH_ORIG"], "/user/lib")
+
+
+class TranscribeVideoTests(unittest.TestCase):
+    """Unit coverage for the transcribe_video sidecar operation."""
+
+    YOUTUBE_URL = "https://www.youtube.com/watch?v=demo123"
+
+    def setUp(self):
+        self.engine = Mock()
+        self.engine.model_status.return_value = {"ready": True}
+        self.engine.transcribe_with_timestamps.return_value = {
+            "text": "hello world",
+            "chunks": [
+                {"text": "hello", "timestamp": (0.0, 1.5)},
+                {"text": "wörld", "timestamp": (1.5, 3.25)},
+            ],
+        }
+        self.work_dirs = []
+
+    def tearDown(self):
+        for path in self.work_dirs:
+            self.assertFalse(path.exists(), f"temporary media left behind: {path}")
+
+    def track_work_dir(self, options):
+        self.work_dirs.append(Path(options["outtmpl"]).parent)
+
+    def fake_ydl(self, options, info=None, downloaded=True):
+        self.track_work_dir(options)
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        info = (
+            {
+                "title": "Demo video",
+                "duration": 120,
+                "availability": "public",
+            }
+            if info is None
+            else info
+        )
+        ydl.extract_info.return_value = info
+
+        def download(result, download=True):
+            hook = options["progress_hooks"][0]
+            hook({"status": "downloading", "downloaded_bytes": 5, "total_bytes": 10})
+            source = Path(options["outtmpl"] % {"ext": "webm"})
+            source.write_bytes(b"audio")
+            return {"requested_downloads": [{"filepath": str(source)}]}
+
+        if downloaded:
+            ydl.process_ie_result.side_effect = download
+        return ydl
+
+    @staticmethod
+    def fake_ffmpeg(command, **_kwargs):
+        with wave.open(command[-1], "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16000)
+            audio.writeframes(b"\x00\x00" * 160)
+        return Mock(returncode=0)
+
+    def run_transcribe(self, request, ydl=None, info=None, **kwargs):
+        request.setdefault("id", "req-1")
+        request.setdefault("type", "transcribe_video")
+        request.setdefault("url", self.YOUTUBE_URL)
+        ydl_factory = ydl or (lambda options: self.fake_ydl(options, info=info))
+        with (
+            patch("yt_dlp.YoutubeDL", side_effect=ydl_factory),
+            patch("subprocess.run", side_effect=self.fake_ffmpeg),
+            patch("tts_mcp.desktop._resolve_ffmpeg", return_value="/fake/ffmpeg"),
+        ):
+            return dispatch_request(request, self.engine, **kwargs)
+
+    def test_success_returns_srt_and_progress_events(self):
+        progress = []
+        response = self.run_transcribe({}, emit=progress.append)
+        self.assertTrue(response["ok"])
+        result = response["result"]
+        self.assertEqual(result["platform"], "youtube")
+        self.assertEqual(result["title"], "Demo video")
+        self.assertEqual(result["duration_seconds"], 120.0)
+        self.assertEqual(result["transcript"], "hello world")
+        self.assertEqual(
+            result["srt"],
+            "1\n00:00:00,000 --> 00:00:01,500\nhello\n\n2\n00:00:01,500 --> 00:00:03,250\nwörld\n",
+        )
+        phases = [event["phase"] for event in progress]
+        self.assertEqual(phases, ["metadata", "fetch", "audio", "transcribe"])
+        self.assertEqual(progress[1]["progress"], 0.5)
+        self.assertTrue(all(event["id"] == "req-1" for event in progress))
+        self.engine.transcribe_with_timestamps.assert_called_once()
+
+    def test_facebook_url_reports_platform(self):
+        response = self.run_transcribe({"url": "https://www.facebook.com/watch?v=12345"})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["platform"], "facebook")
+
+    def test_short_youtube_host_accepted(self):
+        response = self.run_transcribe({"url": "https://youtu.be/demo123"})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["platform"], "youtube")
+
+    def assert_error(self, request, code):
+        response = self.run_transcribe(request)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], code)
+        return response
+
+    def test_rejects_non_https_url(self):
+        self.assert_error({"url": "http://www.youtube.com/watch?v=x"}, "invalid_url")
+
+    def test_rejects_unsupported_host(self):
+        self.assert_error({"url": "https://vimeo.com/123"}, "invalid_url")
+        self.assert_error({"url": "https://www.youtube.com.evil.com/x"}, "invalid_url")
+
+    def test_rejects_malformed_and_empty_url(self):
+        for url in ("", "   ", "not a url", "https://", 123, None):
+            self.assert_error({"url": url}, "invalid_url")
+
+    def test_rejects_url_credentials(self):
+        self.assert_error({"url": "https://user:pass@www.youtube.com/watch?v=x"}, "invalid_url")
+
+    def test_rejects_playlist_urls(self):
+        for url in (
+            "https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/watch?v=x&list=PL123",
+            "https://youtu.be/x?list=PL123",
+        ):
+            self.assert_error({"url": url}, "invalid_url")
+
+    def test_missing_url_field_is_invalid_input(self):
+        request = {"id": "req-x", "type": "transcribe_video"}
+        response = dispatch_request(request, self.engine)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "invalid_input")
+
+    def test_model_not_ready_skips_download(self):
+        self.engine.model_status.return_value = {"ready": False}
+        downloads = []
+        response = self.run_transcribe({}, ydl=lambda options: downloads.append(options))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "model_not_ready")
+        self.assertEqual(downloads, [])
+        self.engine.model_status.assert_called_once()
+        self.engine.transcribe_with_timestamps.assert_not_called()
+
+    def test_playlist_and_multi_result_rejected(self):
+        for info in (
+            {"_type": "playlist", "entries": [{"id": "a"}, {"id": "b"}]},
+            {"entries": [{"id": "a"}]},
+        ):
+
+            def ydl(options, info=info):
+                return self.fake_ydl(options, info=info)
+
+            response = self.run_transcribe({}, ydl=ydl)
+            self.assertFalse(response["ok"], info)
+            self.assertEqual(response["error"]["code"], "invalid_url", info)
+
+    def test_private_and_restricted_videos_rejected(self):
+        for info in (
+            {"title": "x", "duration": 10, "availability": "private"},
+            {"title": "x", "duration": 10, "availability": "needs_auth"},
+            {"title": "x", "duration": 10, "age_limit": 18},
+            {"title": "x", "duration": 10, "is_live": True},
+            {"title": "x", "duration": 10, "live_status": "is_upcoming"},
+            {"title": "x", "duration": 10, "live_status": "post_live"},
+        ):
+
+            def ydl(options, info=info):
+                return self.fake_ydl(options, info=info)
+
+            response = self.run_transcribe({}, ydl=ydl)
+            self.assertFalse(response["ok"], info)
+            self.assertEqual(response["error"]["code"], "video_unavailable", info)
+
+    def test_duration_limits(self):
+        for info, code in (
+            ({"title": "x", "duration": None}, "duration_limit"),
+            ({"title": "x"}, "duration_limit"),
+            ({"title": "x", "duration": 60 * 60 + 1}, "duration_limit"),
+            ({"title": "x", "duration": 0}, "duration_limit"),
+        ):
+
+            def ydl(options, info=info):
+                return self.fake_ydl(options, info=info)
+
+            response = self.run_transcribe({}, ydl=ydl)
+            self.assertFalse(response["ok"], info)
+            self.assertEqual(response["error"]["code"], code, info)
+
+    def test_download_error_maps_to_stable_codes(self):
+        import yt_dlp
+
+        for message, code in (
+            ("Unsupported URL: https://example.com", "invalid_url"),
+            ("Private video. Sign in if you've been granted access", "video_unavailable"),
+            ("HTTP Error 404", "video_unavailable"),
         ):
             ydl = MagicMock()
             ydl.__enter__.return_value = ydl

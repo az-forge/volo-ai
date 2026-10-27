@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import shutil
 import sqlite3
 import sys
+import time
 import tempfile
 import threading
 import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 # Default directories
 DATA_DIR = Path(os.environ.get("TTS_MCP_DATA_DIR", Path.home() / ".tts-mcp"))
@@ -36,9 +39,11 @@ REFERENCE_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg"}
 VOICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SEED_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+AUDIO_HISTORY_STEM_RE = re.compile(r"^[A-Za-z0-9 _-]+$")
 DB_SCHEMA_VERSION = 5
 _STORAGE_LOCK = threading.RLock()
 _MIGRATED_STORAGES: set[tuple[Path, Path]] = set()
+_DATABASE_DIRS_READY: set[tuple[Path, Path]] = set()
 GENERATION_CONFIG_KEYS = frozenset(
     {
         "guidance_scale",
@@ -57,8 +62,26 @@ GENERATION_CONFIG_KEYS = frozenset(
 )
 
 
+def _acquire_lock_cancelable(
+    lock: threading.Lock,
+    should_cancel: Callable[[], bool] | None,
+    message: str,
+) -> None:
+    """Acquire ``lock``, aborting with DownloadCancelled while still queued.
+
+    Once the lock is held the caller runs to completion; cancellation only
+    applies to the wait itself.
+    """
+    while not lock.acquire(timeout=0.25):
+        if should_cancel and should_cancel():
+            raise DownloadCancelled(message)
+    if should_cancel and should_cancel():
+        lock.release()
+        raise DownloadCancelled(message)
+
+
 class DownloadCancelled(RuntimeError):
-    """Raised when a model download is cancelled by the desktop client."""
+    """Raised when a download or queued operation is cancelled by the client."""
 
 
 def validate_language(language: str) -> str:
@@ -84,6 +107,16 @@ def _validate_audio_history_file_name(file_name: str) -> str:
         or Path(file_name).suffix.lower() not in {".wav", ".mp3"}
     ):
         raise ValueError("Audio history file name must be a WAV or MP3 basename")
+    return file_name
+
+
+def _validate_audio_history_rename_target(file_name: str) -> str:
+    file_name = _validate_audio_history_file_name(file_name)
+    if not AUDIO_HISTORY_STEM_RE.fullmatch(Path(file_name).stem):
+        raise ValueError(
+            "Audio history rename target must use only ASCII letters, digits, "
+            "spaces, hyphens, and underscores"
+        )
     return file_name
 
 
@@ -148,8 +181,11 @@ def _validate_reference_audio_path(value: str) -> Path:
 
 
 def _open_database() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    dirs_key = (DATA_DIR.resolve(), VOICES_DIR.resolve())
+    if dirs_key not in _DATABASE_DIRS_READY:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        _DATABASE_DIRS_READY.add(dirs_key)
     connection = sqlite3.connect(DB_PATH, timeout=5.0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -389,14 +425,18 @@ def _download_asset(
                 progress = None
                 if self.total:
                     progress = min(1.0, self.n / self.total)
-                on_progress(
-                    {
-                        "phase": "download",
-                        "asset": repo_id,
-                        "progress": progress,
-                        "message": self.desc or f"Downloading {repo_id}",
-                    }
-                )
+                now = time.monotonic()
+                last_emit = getattr(self, "_last_progress_emit", None)
+                if last_emit is None or progress == 1.0 or now - last_emit >= 0.1:
+                    self._last_progress_emit = now
+                    on_progress(
+                        {
+                            "phase": "download",
+                            "asset": repo_id,
+                            "progress": progress,
+                            "message": self.desc or f"Downloading {repo_id}",
+                        }
+                    )
             return result
 
     if on_progress:
@@ -430,6 +470,43 @@ def _detect_device() -> str:
     return "cpu"
 
 
+def _torch_cuda_build(origin: str) -> bool | None:
+    """Return whether the installed torch is a CUDA build, without importing it.
+
+    Reads the build stamp PyTorch ships in torch/version.py. None means the
+    stamp is missing or unparseable — an uncertain case for the caller.
+    """
+    try:
+        source = Path(origin).with_name("version.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^cuda\b[^=\n]*=\s*['\"]?([^'\"\s]+)", source, re.M)
+    if match is None:
+        return None
+    return match.group(1) != "None"
+
+
+def _detect_device_hint() -> str:
+    """Return the _detect_device result without paying torch's import cost.
+
+    Status probes call this so a cold first request does not block on loading
+    hundreds of MB of torch libraries. The shortcut is sound only where no
+    accelerator can exist — the packaged Windows desktop sidecar installs a
+    CPU-only torch (PyPI's win_amd64 wheel stamps version.py cuda = None) —
+    so every other platform or uncertain package state defers to exact
+    detection.
+    """
+    if "torch" in sys.modules or sys.platform != "win32":
+        return _detect_device()
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is None or spec.origin is None or _torch_cuda_build(spec.origin) is not False:
+        return _detect_device()
+    return "cpu"
+
+
 def _get_dtype():
     """Get optimal dtype for the device."""
     try:
@@ -441,6 +518,73 @@ def _get_dtype():
         return torch.float32  # MPS/CPU often more stable with fp32
     except ImportError:
         return None
+
+
+def _process_peak_rss() -> int | None:
+    """Best-effort peak RSS of this process in bytes; None on failure."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _Counters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _Counters()
+            counters.cb = ctypes.sizeof(_Counters)
+            if ctypes.windll.psapi.GetProcessMemoryInfo(  # type: ignore[attr-defined]
+                ctypes.windll.kernel32.GetCurrentProcess(),  # type: ignore[attr-defined]
+                ctypes.byref(counters),
+                counters.cb,
+            ):
+                return int(counters.PeakWorkingSetSize)
+        except (AttributeError, OSError, ValueError):
+            pass
+        return None
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (ImportError, OSError):
+        return None
+    if usage <= 0:
+        return None
+    # Linux reports KiB; macOS reports bytes.
+    return int(usage if sys.platform == "darwin" else usage * 1024)
+
+
+def _record_stderr_failure(exc: OSError) -> None:
+    """Persist a failed stderr write through bounded diagnostics; never raise."""
+    try:
+        from tts_mcp import desktop_diagnostics
+
+        desktop_diagnostics.record(
+            DATA_DIR,
+            "stderr_write_failed",
+            message=desktop_diagnostics.os_error_message(exc) or type(exc).__name__,
+            error_type=type(exc).__name__,
+        )
+    except Exception:
+        pass
+
+
+def _log_stderr(message: str) -> None:
+    """Write a nonessential progress line; a broken stderr must not abort."""
+    try:
+        print(message, file=sys.stderr)
+    except OSError as exc:
+        _record_stderr_failure(exc)
 
 
 class Engine:
@@ -477,10 +621,7 @@ class Engine:
         if dtype is not None:
             kwargs["dtype"] = dtype
 
-        print(
-            f"[tts-mcp] Loading OmniVoice on {device} ({dtype})...",
-            file=sys.stderr,
-        )
+        _log_stderr(f"[tts-mcp] Loading OmniVoice on {device} ({dtype})...")
         kwargs.update(
             {
                 "load_asr": True,
@@ -491,7 +632,7 @@ class Engine:
         with self._model_lock:
             if self._model is None:
                 self._model = OmniVoice.from_pretrained(str(MODEL_DIR), **kwargs)
-        print("[tts-mcp] Model loaded.", file=sys.stderr)
+        _log_stderr("[tts-mcp] Model loaded.")
 
     def model_status(self) -> dict[str, Any]:
         """Return whether all assets needed for offline generation are ready."""
@@ -503,11 +644,29 @@ class Engine:
         )
         return {
             "ready": ready,
-            "device": _detect_device(),
+            "device": _detect_device_hint(),
             "model": MODEL_ID,
             "tokenizer": TOKENIZER_ID,
             "asr_model": ASR_ID,
         }
+
+    def gpu_memory_bytes(self) -> int | None:
+        """Best-effort GPU memory held by the loaded model; None when idle."""
+        if self._model is None:
+            return None
+        try:
+            import torch
+
+            device = _detect_device()
+            if device.startswith("cuda"):
+                return int(torch.cuda.memory_allocated())
+            if device == "mps":
+                allocated = getattr(torch.mps, "current_allocated_memory", None)
+                if allocated is not None:
+                    return int(allocated())
+        except Exception:
+            pass
+        return None
 
     def ensure_model(
         self,
@@ -575,6 +734,7 @@ class Engine:
         normalize_text: bool = False,
         duration: float | None = None,
         generation_config: dict[str, Any] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> np.ndarray:
         """Generate audio from text.
 
@@ -614,8 +774,13 @@ class Engine:
             kwargs["instruct"] = instruct
 
         model = self.model
-        with self._inference_lock:
+        _acquire_lock_cancelable(
+            self._inference_lock, should_cancel, "Synthesis cancelled"
+        )
+        try:
             audio_list = model.generate(**kwargs)
+        finally:
+            self._inference_lock.release()
         return audio_list[0]  # np.ndarray shape (T,) at 24 kHz
 
     def transcribe_with_timestamps(self, audio: tuple) -> dict[str, Any]:
@@ -625,6 +790,7 @@ class Engine:
         triggers a lazy load and possible model download. The pipeline is the
         one already loaded by OmniVoice — no duplicate ASR model is created.
         """
+        import numpy as np
         import torch
 
         pipe = getattr(self.model, "_asr_pipe", None)
@@ -1399,7 +1565,7 @@ class Engine:
     @staticmethod
     def rename_audio_history(old_file_name: str, new_file_name: str) -> bool:
         old_file_name = _validate_audio_history_file_name(old_file_name)
-        new_file_name = _validate_audio_history_file_name(new_file_name)
+        new_file_name = _validate_audio_history_rename_target(new_file_name)
         with _STORAGE_LOCK:
             with closing(Engine._open_storage()) as connection:
                 with connection:

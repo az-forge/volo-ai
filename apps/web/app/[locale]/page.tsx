@@ -37,14 +37,23 @@ function PlatformAssetLink({
   locale,
   downloadLabel,
   platformName,
+  platformKey,
 }: {
   asset: ReleaseAsset;
   locale: Locale;
   downloadLabel: string;
   platformName: string;
+  platformKey: PlatformKey;
 }) {
   return (
-    <a className="asset-link" href={asset.url} aria-label={`${downloadLabel} ${platformName}: ${asset.name}`}>
+    <a
+      className="asset-link"
+      href={asset.url}
+      aria-label={`${downloadLabel} ${platformName}: ${asset.name}`}
+      data-umami-event="download"
+      data-umami-event-platform={platformKey}
+      data-umami-event-format={asset.format}
+    >
       <span className="asset-format">{asset.format.slice(1).toUpperCase()}</span>
       <span className="asset-description">
         <span className="asset-name">{asset.name}</span>
@@ -93,10 +102,10 @@ export default async function LocaleHomePage({ params }: PageProps) {
             </h1>
             <p className="hero-description">{text.heroBody}</p>
             <div className="hero-actions">
-              <a className="button button-primary" href="#downloads">
+              <a className="button button-primary" href="#downloads" data-umami-event="download_section_click" data-umami-event-location="hero">
                 {text.heroAction} <IconDownload />
               </a>
-              <a className="button button-secondary" href={`https://github.com/${GITHUB_REPOSITORY}`}>
+              <a className="button button-secondary" href={`https://github.com/${GITHUB_REPOSITORY}`} data-umami-event="github_click" data-umami-event-location="hero">
                 <IconGithub /> {text.sourceAction}
               </a>
             </div>
@@ -175,7 +184,7 @@ export default async function LocaleHomePage({ params }: PageProps) {
                     <h3>{release.tag}</h3>
                     <p>{text.publishedOn} <time dateTime={release.publishedAt}>{releaseDate}</time></p>
                   </div>
-                  <a className="release-notes" href={release.notesUrl}>{text.releaseNotes}<IconExternal /></a>
+                  <a className="release-notes" href={release.notesUrl} data-umami-event="release_notes_click">{text.releaseNotes}<IconExternal /></a>
                 </>
               ) : (
                 <>
@@ -227,6 +236,7 @@ export default async function LocaleHomePage({ params }: PageProps) {
                             locale={locale}
                             downloadLabel={text.downloadFile}
                             platformName={platform.name}
+                            platformKey={key}
                           />
                         )) : <p className="platform-unavailable">{emptyMessage}</p>}
                       </div>

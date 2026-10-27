@@ -7,24 +7,30 @@ import importlib.util
 import math
 import os
 import queue
+import re
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import TYPE_CHECKING, Any, Callable, TextIO
 
 from tts_mcp.convert import save_audio
 from tts_mcp import desktop_diagnostics, desktop_runtime
-from tts_mcp.api import ApiServer, ApiStartError
+
+if TYPE_CHECKING:
+    from tts_mcp.api import ApiServer
 from tts_mcp.engine import (
     DATA_DIR,
     DownloadCancelled,
     Engine,
     GENERATION_CONFIG_KEYS,
     SUPPORTED_LANGUAGES,
+    _process_peak_rss,
+    _validate_reference_audio_path,
     get_engine,
     validate_language,
 )
@@ -32,9 +38,8 @@ from tts_mcp.desktop_vieneu import VieNeuProvider
 from tts_mcp.transcribe import TranscriptionError, transcribe_video
 
 OUTPUT_DIR = DATA_DIR / "outputs"
-AUDIO_HISTORY_PAGE_SIZE = 50
+AUDIO_HISTORY_PAGE_SIZE = 20
 ALLOWED_FORMATS = {"wav", "mp3"}
-ALLOWED_REFERENCE_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg"}
 GENERATION_BOOLEAN_KEYS = {"denoise", "preprocess_prompt", "postprocess_output"}
 GENERATION_POSITIVE_KEYS = {"audio_chunk_duration", "audio_chunk_threshold"}
 VIENEU_SEED_REFERENCE_TEXT = (
@@ -49,6 +54,8 @@ _api_server_lock = threading.Lock()
 def _local_api_server() -> ApiServer:
     """Return the single loopback API server owned by this sidecar process."""
     global _api_server
+    from tts_mcp.api import ApiServer
+
     with _api_server_lock:
         if _api_server is None:
             _api_server = ApiServer()
@@ -79,20 +86,62 @@ def _error(request_id: str, code: str, message: str) -> dict[str, Any]:
     }
 
 
-def _record_dispatch_failure(operation: Any, code: str, exc: Exception) -> None:
+def _chained_os_error_message(exc: BaseException) -> str | None:
+    """Return safe OS details for an OSError wrapped by ``exc``, else None.
+
+    Walks ``__cause__``/``__context__`` so an exception raised from an OSError
+    keeps the underlying errno/winerror/strerror without its filename.
+    """
+    seen = {id(exc)}
+    current = exc.__cause__ or exc.__context__
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = desktop_diagnostics.os_error_message(current)
+        if message is not None:
+            return message
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _record_dispatch_failure(
+    operation: Any,
+    code: str,
+    exc: Exception,
+    *,
+    request_id: str,
+    provider: str | None,
+    stage: str | None,
+    asset: str | None,
+    duration_ms: int,
+) -> None:
     import traceback
 
     category = (
         "runtime_install_failed" if operation == "install_nvidia_runtime" else "request_failed"
     )
     stack = "".join(traceback.format_list(traceback.extract_tb(exc.__traceback__)))[-12_000:]
+    message = desktop_diagnostics.os_error_message(exc)
+    if message is None:
+        cause = _chained_os_error_message(exc)
+        if cause is not None:
+            message = f"{type(exc).__name__}; caused by {cause}"
+        else:
+            message = (
+                str(exc) if operation in {"status", "prepare_model"} else type(exc).__name__
+            )
     desktop_diagnostics.record(
         DATA_DIR,
         category,
         operation=str(operation or "unknown"),
         code=code,
-        message=type(exc).__name__,
+        message=message,
         traceback=stack,
+        request_id=request_id,
+        provider=provider,
+        stage=stage,
+        asset=asset,
+        error_type=type(exc).__name__,
+        duration_ms=duration_ms,
     )
 
 
@@ -143,6 +192,14 @@ def _restore_library_path_env() -> None:
             os.environ.pop(name, None)
 
 
+def _configure_stdio_utf8() -> None:
+    """Switch process stdio to UTF-8 before protocol traffic and diagnostics."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def _resolve_ffmpeg() -> str | None:
     bundled_root = getattr(sys, "_MEIPASS", None)
     candidates = []
@@ -161,18 +218,7 @@ def _resolve_ffmpeg() -> str | None:
 def _validate_reference_audio(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Reference audio path must be a non-empty string")
-    path = Path(value)
-    if path.suffix.lower() not in ALLOWED_REFERENCE_EXTENSIONS:
-        raise ValueError("Reference audio must be a WAV, MP3, FLAC, or OGG file")
-    if not path.is_file():
-        raise FileNotFoundError(f"Reference audio file was not found: {value}")
-    try:
-        import soundfile as sf
-
-        sf.info(str(path))
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError("Reference audio file is not a readable audio file") from exc
-    return value
+    return str(_validate_reference_audio_path(value))
 
 
 def _validate_number(value: Any, field: str, *, positive: bool = False) -> float:
@@ -218,7 +264,11 @@ def _reject_voice_payload(request: dict[str, Any], fields: tuple[str, ...]) -> N
         raise ValueError(f"Fields not valid for this voice mode: {', '.join(present)}")
 
 
-def _synthesize(request: dict[str, Any], engine: Engine) -> dict[str, Any]:
+def _synthesize(
+    request: dict[str, Any],
+    engine: Engine,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     if "vieneu_config" in request:
         raise ValueError("vieneu_config is only valid for the VieNeu provider")
     text = request.get("text")
@@ -299,7 +349,7 @@ def _synthesize(request: dict[str, Any], engine: Engine) -> dict[str, Any]:
     if generation_config:
         kwargs["generation_config"] = generation_config
 
-    audio = engine.generate(**kwargs)
+    audio = engine.generate(should_cancel=should_cancel, **kwargs)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"{uuid.uuid4().hex}.{output_format}"
     save_audio(audio, str(output_path), ffmpeg_path=_resolve_ffmpeg())
@@ -347,71 +397,75 @@ def _record_audio_history(request: dict[str, Any], provider: str, result: dict[s
         print(f"[tts-mcp] audio history metadata write failed: {exc}", file=sys.stderr)
 
 
-def _list_audio_history() -> list[dict[str, Any]]:
+def _scan_audio_history() -> list[tuple[str, str, str, dict[str, Any] | None, str]]:
+    """Scan the output dir once; item dicts are built only for kept pages."""
     metadata = {item["file_name"]: item for item in Engine.list_audio_history()}
     output_dir = OUTPUT_DIR.resolve()
     if not output_dir.exists():
         return []
 
     items = []
-    for path in output_dir.iterdir():
-        if path.is_symlink() or path.suffix.lower() not in {".wav", ".mp3"}:
-            continue
-        try:
-            if not path.is_file():
+    with os.scandir(output_dir) as entries:
+        for entry in entries:
+            suffix = os.path.splitext(entry.name)[1].lower()
+            if entry.is_symlink() or suffix not in {".wav", ".mp3"}:
                 continue
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        record = metadata.get(path.name)
-        items.append(
-            {
-                "id": path.name,
-                "audio_path": str(path.resolve()),
-                "format": path.suffix.lower().lstrip("."),
-                "created_at": record["created_at"]
+            try:
+                if not entry.is_file():
+                    continue
+                stat = entry.stat()
+            except FileNotFoundError:
+                continue
+            record = metadata.get(entry.name)
+            created_at = (
+                record["created_at"]
                 if record
-                else datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-                "provider": record["provider"] if record else None,
-                "voice_name": record["voice_name"] if record else None,
-                "text": record["text"] if record else None,
-                "metadata_available": record is not None,
-            }
-        )
-    items.sort(key=lambda item: item["id"])
-    items.sort(key=lambda item: item["created_at"], reverse=True)
+                else datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+            )
+            items.append((entry.name, suffix.lstrip("."), created_at, record, entry.path))
+    items.sort(key=lambda item: item[0])
+    items.sort(key=lambda item: item[2], reverse=True)
     return items
 
 
-def _list_audio_history_page(cursor: Any) -> dict[str, Any]:
-    if cursor is not None and (
-        not isinstance(cursor, dict)
-        or set(cursor) != {"created_at", "id"}
-        or not isinstance(cursor["created_at"], str)
-        or not cursor["created_at"].strip()
-        or not isinstance(cursor["id"], str)
-        or not cursor["id"].strip()
-    ):
-        raise ValueError("Audio history cursor must contain created_at and id strings")
-
-    items = _list_audio_history()
-    total = len(items)
-    if cursor is not None:
-        items = [
-            item
-            for item in items
-            if item["created_at"] < cursor["created_at"]
-            or (item["created_at"] == cursor["created_at"] and item["id"] > cursor["id"])
-        ]
-    page = items[:AUDIO_HISTORY_PAGE_SIZE]
-    has_more = len(items) > AUDIO_HISTORY_PAGE_SIZE
-    last_item = page[-1] if has_more else None
+def _history_item(
+    name: str,
+    suffix: str,
+    created_at: str,
+    record: dict[str, Any] | None,
+    path: str,
+) -> dict[str, Any]:
     return {
-        "items": page,
+        "id": name,
+        "audio_path": str(Path(path).resolve()),
+        "format": suffix,
+        "created_at": created_at,
+        "provider": record["provider"] if record else None,
+        "voice_name": record["voice_name"] if record else None,
+        "text": record["text"] if record else None,
+        "metadata_available": record is not None,
+    }
+
+
+def _list_audio_history() -> list[dict[str, Any]]:
+    return [_history_item(*item) for item in _scan_audio_history()]
+
+
+def _list_audio_history_page(page: Any) -> dict[str, Any]:
+    if type(page) is not int or page < 1:
+        raise ValueError("Audio history page must be a positive integer")
+    items = _scan_audio_history()
+    total = len(items)
+    page_count = (total + AUDIO_HISTORY_PAGE_SIZE - 1) // AUDIO_HISTORY_PAGE_SIZE
+    page = min(page, page_count) if page_count else 1
+    start = (page - 1) * AUDIO_HISTORY_PAGE_SIZE
+    return {
+        "items": [
+            _history_item(*item) for item in items[start : start + AUDIO_HISTORY_PAGE_SIZE]
+        ],
         "total": total,
-        "next_cursor": (
-            {"created_at": last_item["created_at"], "id": last_item["id"]} if last_item else None
-        ),
+        "page": page,
+        "page_count": page_count,
     }
 
 
@@ -442,6 +496,8 @@ _WINDOWS_DEVICE_NAMES = {
     *(f"LPT{digit}" for digit in "¹²³"),
 }
 
+_ASCII_OUTPUT_STEM = re.compile(r"^[A-Za-z0-9 _-]+$")
+
 
 def _validate_output_stem(new_name: Any) -> str:
     if not isinstance(new_name, str):
@@ -458,6 +514,11 @@ def _validate_output_stem(new_name: Any) -> str:
         )
     ):
         raise ValueError("Audio history name is not a valid filename stem")
+    if not _ASCII_OUTPUT_STEM.fullmatch(stem):
+        raise ValueError(
+            "Audio history name must use only ASCII letters, digits, spaces, "
+            "hyphens, and underscores"
+        )
     return stem
 
 
@@ -631,6 +692,7 @@ def _seed_vieneu_voices(
     failed: list[dict[str, str]] = []
     unfinished: list[str] = []
     cancelled = False
+    voices = Engine.list_voices()
     for current, preset in enumerate(presets, start=1):
         preset_id = preset["id"]
         if should_cancel and should_cancel():
@@ -650,7 +712,6 @@ def _seed_vieneu_voices(
                 }
             )
         try:
-            voices = Engine.list_voices()
             matches = [
                 voice
                 for voice in voices
@@ -690,6 +751,7 @@ def _seed_vieneu_voices(
                         voices,
                         temporary_dir,
                         output_path=output_path,
+                        should_cancel=should_cancel,
                     )
                     if not output_path.is_file():
                         raise RuntimeError("VieNeu did not produce a reference WAV")
@@ -708,6 +770,14 @@ def _seed_vieneu_voices(
                     str(reference),
                     VIENEU_SEED_REFERENCE_TEXT,
                 )
+            if not matches:
+                voices.append(
+                    {
+                        "name": profile_name,
+                        "kind": "vieneu_preset",
+                        "preset_id": preset_id,
+                    }
+                )
             outcomes.append(
                 {
                     "preset_id": preset_id,
@@ -715,6 +785,10 @@ def _seed_vieneu_voices(
                     "status": item_status,
                 }
             )
+        except DownloadCancelled:
+            unfinished.extend(voice["id"] for voice in presets[current - 1 :])
+            cancelled = True
+            break
         except Exception as exc:
             failed.append({"preset_id": preset_id, "message": str(exc)})
 
@@ -736,6 +810,36 @@ def dispatch_request(
     """Handle one decoded request and return one terminal response."""
     request_id = _request_id(request)
     operation = request.get("type")
+    started_at = time.monotonic()
+    last_progress: dict[str, str] = {}
+
+    def emit_preparation_progress(progress: dict[str, Any], provider_id: str) -> None:
+        for key in ("phase", "asset"):
+            value = progress.get(key)
+            if isinstance(value, str):
+                last_progress[key] = value
+        if emit:
+            emit(
+                {
+                    "id": request_id,
+                    "event": "progress",
+                    **progress,
+                    "provider": provider_id,
+                }
+            )
+
+    def record_failure(code: str, exc: Exception) -> None:
+        provider = request.get("provider")
+        _record_dispatch_failure(
+            operation,
+            code,
+            exc,
+            request_id=request_id,
+            provider=provider if isinstance(provider, str) else None,
+            stage=last_progress.get("phase"),
+            asset=last_progress.get("asset"),
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
     try:
         if operation == "status":
             status = engine.model_status()
@@ -756,8 +860,13 @@ def dispatch_request(
                     ),
                     "diagnostics": desktop_diagnostics.events(DATA_DIR),
                     "diagnostics_complete": desktop_diagnostics.is_complete(),
+                    "resources": {
+                        "peak_rss_bytes": _process_peak_rss(),
+                        "gpu_memory_bytes": engine.gpu_memory_bytes(),
+                    },
                     "providers": {
                         "omnivoice": {
+                            "backend": status["device"],
                             "model_ready": bool(status["ready"]),
                             "runtime_available": omnivoice_available,
                             "preprocessing_available": True,
@@ -765,7 +874,7 @@ def dispatch_request(
                             if omnivoice_available
                             else "OmniVoice package is unavailable in this environment",
                         },
-                        "vieneu": vieneu_status,
+                        "vieneu": {**vieneu_status, "backend": "cpu"},
                     },
                 },
             )
@@ -826,16 +935,7 @@ def dispatch_request(
             )
             result = prepare(
                 on_progress=(
-                    (
-                        lambda progress: emit(
-                            {
-                                "id": request_id,
-                                "event": "progress",
-                                **progress,
-                                "provider": provider_id,
-                            }
-                        )
-                    )
+                    (lambda progress: emit_preparation_progress(progress, provider_id))
                     if emit
                     else None
                 ),
@@ -845,7 +945,7 @@ def dispatch_request(
         if operation == "synthesize":
             provider_id = _provider_id(request)
             if provider_id == "omnivoice":
-                result = _synthesize(request, engine)
+                result = _synthesize(request, engine, should_cancel)
             else:
                 provider = vieneu_provider or VieNeuProvider(DATA_DIR)
                 voices = Engine.list_voices()
@@ -867,7 +967,12 @@ def dispatch_request(
                             "preset_id": profile["preset_id"],
                         }
                         provider_request.pop("voice_name", None)
-                result = provider.synthesize(provider_request, voices, OUTPUT_DIR)
+                result = provider.synthesize(
+                    provider_request,
+                    voices,
+                    OUTPUT_DIR,
+                    should_cancel=should_cancel,
+                )
             _record_audio_history(request, provider_id, result)
             return _ok(request_id, result)
         if operation == "save_voice":
@@ -916,11 +1021,12 @@ def dispatch_request(
             paginated = request.get("paginated", False)
             if not isinstance(paginated, bool):
                 raise ValueError("paginated must be a boolean")
-            cursor = request.get("cursor")
             if paginated:
-                return _ok(request_id, _list_audio_history_page(cursor))
-            if cursor is not None:
-                raise ValueError("cursor requires paginated audio history")
+                if "cursor" in request:
+                    raise ValueError("cursor-based audio history is no longer supported")
+                return _ok(request_id, _list_audio_history_page(request.get("page", 1)))
+            if "page" in request or "cursor" in request:
+                raise ValueError("page and cursor require paginated audio history")
             return _ok(request_id, {"items": _list_audio_history()})
         if operation == "delete_audio_history":
             if "file_name" not in request:
@@ -941,6 +1047,8 @@ def dispatch_request(
                 {"deleted": Engine.delete_voice(request["name"])},
             )
         if operation == "start_api":
+            from tts_mcp.api import ApiStartError
+
             try:
                 return _ok(request_id, _local_api_server().start())
             except ApiStartError as exc:
@@ -967,14 +1075,14 @@ def dispatch_request(
             return _error(
                 request_id,
                 "invalid_request",
-                "Cancel is only valid during a model or optional runtime download",
+                "Cancel is only valid during an active long-running operation",
             )
         return _error(request_id, "invalid_request", f"Unknown operation: {operation}")
     except TranscriptionError as exc:
-        _record_dispatch_failure(operation, exc.code, exc)
+        record_failure(exc.code, exc)
         return _error(request_id, exc.code, str(exc))
     except DownloadCancelled as exc:
-        _record_dispatch_failure(operation, "cancelled", exc)
+        record_failure("cancelled", exc)
         return _error(request_id, "cancelled", str(exc))
     except desktop_runtime.RuntimeDownloadCancelled as exc:
         desktop_diagnostics.record(
@@ -983,22 +1091,24 @@ def dispatch_request(
             operation=str(operation),
             code="cancelled",
             message="NVIDIA runtime download cancelled by the user",
+            request_id=request_id,
+            duration_ms=round((time.monotonic() - started_at) * 1000),
         )
         return _error(request_id, "cancelled", str(exc))
     except KeyError as exc:
-        _record_dispatch_failure(operation, "invalid_input", exc)
+        record_failure("invalid_input", exc)
         return _error(request_id, "invalid_input", f"Missing field: {exc.args[0]}")
     except FileNotFoundError as exc:
-        _record_dispatch_failure(operation, "not_found", exc)
+        record_failure("not_found", exc)
         return _error(request_id, "not_found", str(exc))
     except ValueError as exc:
-        _record_dispatch_failure(operation, "invalid_input", exc)
+        record_failure("invalid_input", exc)
         return _error(request_id, "invalid_input", str(exc))
     except RuntimeError as exc:
-        _record_dispatch_failure(operation, "operation_failed", exc)
+        record_failure("operation_failed", exc)
         return _error(request_id, "operation_failed", str(exc))
     except Exception as exc:
-        _record_dispatch_failure(operation, "internal_error", exc)
+        record_failure("internal_error", exc)
         print(
             f"[tts-mcp] desktop operation failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
@@ -1066,6 +1176,7 @@ def run_protocol(
             "seed_vieneu_voices",
             "install_nvidia_runtime",
             "transcribe_video",
+            "synthesize",
         }:
             provider_id = request.get("provider") if operation == "prepare_model" else None
             if not isinstance(provider_id, str) or provider_id not in {"omnivoice", "vieneu"}:
@@ -1148,6 +1259,7 @@ def run_protocol(
 
 
 def main() -> None:
+    _configure_stdio_utf8()
     _restore_library_path_env()
     if sys.argv[1:] == ["--runtime-check"]:
         raise SystemExit(_runtime_check())

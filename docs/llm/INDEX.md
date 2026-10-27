@@ -10,6 +10,8 @@
 - [Desktop speech providers](workflows/desktop-vieneu.md) — provider selection,
   on-demand asset setup, provider-aware saved VieNeu profiles, batch preset
   seeding, and synthesis through the native audio.cpp CLI.
+- [Desktop audio history](workflows/desktop-audio-history.md) — local WAV/MP3
+  history with numbered pagination and existing playback/file actions.
 - [Desktop video transcription](workflows/desktop-video-transcription.md) —
   public YouTube-first (Facebook secondary) video links fetched with yt-dlp,
   normalized through bundled FFmpeg, transcribed locally into timestamped SRT,
@@ -19,6 +21,7 @@
 
 | Prefix | Domain |
 | --- | --- |
+| DAH | Desktop audio history |
 | DSET | Desktop settings and diagnostics |
 | DVP | Desktop voice providers |
 | DVT | Desktop video transcription |
@@ -26,9 +29,9 @@
 
 ## Feature inventory
 
-The desktop provider and MCP voice-library workflows have source-backed deep
-coverage below. The remaining desktop behaviors are mapped in the architecture
-overview but do not yet have dedicated wiki feature pages:
+The desktop provider, audio-history, and MCP voice-library workflows have
+source-backed deep coverage below. The remaining desktop behaviors are mapped
+in the architecture overview but do not yet have dedicated wiki feature pages:
 
 - [x] Desktop provider setup and offline synthesis — the desktop sidecar reports
   both providers, the first-run screen prepares all missing providers
@@ -54,11 +57,14 @@ overview but do not yet have dedicated wiki feature pages:
   Storage, and MCP tabs. The MCP tab generates copyable setup for Codex CLI,
   Claude Code, Claude Desktop, Cursor, VS Code / GitHub Copilot, and Zed,
   including the app data path; Settings is also reachable from the first-run
-  setup screen.
-- [x] Desktop audio history — the app lists and plays WAV/MP3 files from its
-  output directory, including older files without synthesis metadata; it can
-  rename an output while preserving its extension and metadata, copy its local
-  path, confirm deletion, and keep the five latest session takes in Workspace.
+  setup screen. General also opens the public GitHub Ideas category for feature
+  suggestions and the repository homepage for manually starring the project;
+  a Ko-fi action opens the Volo AI support page in the system browser. The
+  localized notice explains public visibility and GitHub sign-in.
+- [x] Desktop audio history — the app lists local WAV/MP3 files, including
+  legacy outputs without synthesis metadata, in newest-first numbered pages of
+  20 items; it plays, renames, copies paths, and confirms deletion. See the
+  [Desktop audio history workflow](workflows/desktop-audio-history.md).
 - [x] Desktop update notices — startup checks the latest stable GitHub release
   without blocking app startup, at most once per 24 hours; Settings supports a
   manual check that can resurface a dismissed update, and a localized banner
@@ -87,15 +93,20 @@ overview but do not yet have dedicated wiki feature pages:
   tag's validated installer assets, and show a localized status when no
   verified installer is available. See the
   [architecture overview](architecture/overview.md), which also maps the
-  localized feature overview route.
+  localized feature overview route. The Features page and shared footer link to
+  GitHub Ideas and the repository for manual starring; header/footer branding
+  and the browser icon use the supplied Volo logo. A Ko-fi Floating Button is
+  available across the localized web pages and opens the Volo AI support panel.
 - [x] Desktop local REST API — Settings starts and stops an opt-in API bound to
   `127.0.0.1:8765`; it reuses the MCP tools and app data and stops with the
   desktop sidecar. See the [API reference](../desktop-local-api.md) for routes
   and the no-token trust boundary.
 - [x] Desktop NVIDIA runtime and diagnostics — Linux x64 uses CPU PyTorch by
   default and can install a version-matched NVIDIA sidecar from Settings;
-  failed GPU checks fall back to CPU. Logs retains bounded local diagnostics
-  and exports a redacted report only when requested. See [Desktop runtime and
+  failed GPU checks fall back to CPU. Logs is available during first-run setup
+  before providers are ready and exports bounded, sanitized diagnostics only
+  when requested, including failed-request context and an incomplete
+  frontend-only report if the sidecar cannot respond. See [Desktop runtime and
   diagnostics](workflows/desktop-runtime-diagnostics.md).
 
 ## Sources

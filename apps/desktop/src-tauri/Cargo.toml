@@ -1,6 +1,6 @@
 [package]
 name = "volo-ai-desktop"
-version = "0.1.1"
+version = "0.3.0"
 description = "Volo AI local voice desktop application"
 authors = ["tts-mcp"]
 edition = "2021"
@@ -18,3 +18,8 @@ tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
